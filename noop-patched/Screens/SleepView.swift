@@ -1,6 +1,7 @@
 import SwiftUI
 import Foundation
 import StrandDesign
+import StrandAnalytics
 import WhoopStore
 
 // MARK: - SleepView
@@ -688,16 +689,31 @@ struct SleepView: View {
         metric { $0.respRateBpm }
     }
 
-    /// Sleep debt (minutes): the imported sleep_debt_min when the export carried it; else
-    /// the APPROXIMATE per-night need − asleep, floored at 0 (no "credit").
+    /// Sleep debt (minutes): the imported sleep_debt_min when the export carried it; else a proper
+    /// rolling LEDGER (ported SleepDebt engine, v2.10.0) — a 14-night running balance that nets each
+    /// night's surplus and deficit vs need, rather than a single floored "need − asleep". The series
+    /// shows the running debt balance as a positive magnitude (0 = caught up); the latest point is the
+    /// current standing.
     private var sleepDebtSeries: Metric {
         let imported = repo.importedSleep
         let need = sleepNeedMin
+
+        // Per-day series for the engine: export-verbatim asleep where present, else computed.
+        let nightly: [(day: String, totalSleepMin: Double?)] = repo.days.map { d in
+            (day: d.day, totalSleepMin: d.totalSleepMin)
+        }
+        let ledger = SleepDebt.ledger(series: nightly, needHours: need / 60.0)
+
+        // Render the ledger's running balance as a non-negative debt magnitude per night, but keep any
+        // export-verbatim debt value as the source of truth for that specific day.
+        var running = 0.0
         let series = repo.days.compactMap { d -> Double? in
             if let debt = imported[d.day]?.debtMin { return debt }   // minutes, export-verbatim
             guard let asleep = d.totalSleepMin, asleep > 0, need > 0 else { return nil }
-            return Swift.max(0, need - asleep)   // APPROXIMATE fallback
+            running = Swift.min(0, running + (asleep - need))        // credit can repay, never bank surplus
+            return -running                                          // positive = minutes of debt owed
         }
+        _ = ledger.balanceMin   // the engine balance is available for a future "you owe Nh" headline
         return (series.last, mean(series), series)
     }
 
