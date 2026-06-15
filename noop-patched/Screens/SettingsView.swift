@@ -88,19 +88,53 @@ struct SettingsView: View {
     ///     so falsely read "present" even when sleep hadn't updated.)
     ///  3. Sync state — live "Syncing…" with chunk count, else "Up to date" / "Idle".
     private var dataFooter: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            footerRow(icon: "bolt.heart",
-                      tint: StrandPalette.textTertiary,
-                      text: "Live HR up to \(freshnessText(liveHRUpTo, withTime: true))")
-            footerRow(icon: "heart.text.square",
-                      tint: healthIsStale ? StrandPalette.accent : StrandPalette.textTertiary,
-                      text: "Health data up to \(freshnessText(healthUpTo, withTime: false))")
-            footerRow(icon: live.backfilling ? "arrow.triangle.2.circlepath" : "checkmark.circle",
-                      tint: live.backfilling ? StrandPalette.accent : StrandPalette.textTertiary,
-                      text: syncStateText)
+        VStack(alignment: .leading, spacing: 8) {
+            // Headline: how far behind the sync is, in plain words, always visible so you
+            // never have to ask. Green when caught up, accent when behind.
+            HStack(spacing: 7) {
+                Image(systemName: behindHeadline.caughtUp ? "checkmark.circle.fill" : "clock.badge.exclamationmark.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(behindHeadline.caughtUp ? StrandPalette.recovery100 : StrandPalette.statusWarning)
+                Text(behindHeadline.text)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textPrimary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                footerRow(icon: "bolt.heart",
+                          tint: StrandPalette.textTertiary,
+                          text: "Live HR up to \(freshnessText(liveHRUpTo, withTime: true))")
+                footerRow(icon: "heart.text.square",
+                          tint: healthIsStale ? StrandPalette.accent : StrandPalette.textTertiary,
+                          text: "Health data up to \(freshnessText(healthUpTo, withTime: false))")
+                footerRow(icon: live.backfilling ? "arrow.triangle.2.circlepath" : "checkmark.circle",
+                          tint: live.backfilling ? StrandPalette.accent : StrandPalette.textTertiary,
+                          text: syncStateText)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 4)
+    }
+
+    /// The one-glance "how far behind" headline. Measures the gap between the newest
+    /// COMPLETE day (yesterday, the last day that could be fully synced) and the newest
+    /// health day actually on device. 0 days behind = caught up. nil health = no data yet.
+    private var behindHeadline: (text: String, caughtUp: Bool) {
+        guard let health = healthUpTo else {
+            return ("No health data synced yet", false)
+        }
+        let cal = Calendar.current
+        // Yesterday is the latest day that can be fully offloaded (today is still in progress).
+        let yesterday = cal.startOfDay(for: Date()).addingTimeInterval(-86_400)
+        let healthDay = cal.startOfDay(for: health)
+        let daysBehind = max(0, cal.dateComponents([.day], from: healthDay, to: yesterday).day ?? 0)
+        if live.backfilling {
+            return ("Syncing… catching up \(daysBehind == 0 ? "the latest day" : "\(daysBehind) day\(daysBehind == 1 ? "" : "s")")", false)
+        }
+        if daysBehind <= 0 {
+            return ("Sync caught up — through yesterday", true)
+        }
+        let last = freshnessText(health, withTime: false)
+        return ("Behind by \(daysBehind) day\(daysBehind == 1 ? "" : "s") · last full day: \(last.components(separatedBy: " · ").first ?? last)", false)
     }
 
     private func footerRow(icon: String, tint: Color, text: String) -> some View {
