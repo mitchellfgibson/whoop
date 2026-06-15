@@ -439,6 +439,13 @@ public enum SleepStager {
         // Pre-onset and post-final-wake epochs are not sleep → force wake.
         for i in 0..<labels.count where i < onsetIdx || i > finalWakeIdx { labels[i] = "wake" }
 
+        // Conservative fragment merge (#274, ported v2.11.0): absorb sub-3-min stage flecks (the
+        // WHOOP 5/MG sparse-motion artefact) so the hypnogram stops reading choppier than WHOOP's,
+        // WITHOUT erasing genuine multi-minute transitions. Display/scoring smoothing applied AFTER
+        // staging — it never touches the HMM per-epoch detection above — and it biases ties toward the
+        // LIGHTER stage so it can never inflate deep/REM.
+        labels = mergeFragments(labels)
+
         // Merge consecutive same-stage epochs into segments tiling [start, end].
         var segments: [StageSegment] = []
         for (i, stage) in labels.enumerated() {
@@ -957,6 +964,92 @@ public enum SleepStager {
             let winners = order.filter { counts[$0] == best }  // insertion order preserved
             out.append(winners.contains(labels[i]) ? labels[i] : winners[0])
         }
+        return out
+    }
+
+    // MARK: - Fragment merge (display/scoring smoothing, ported v2.11.0 #274)
+
+    /// Fragment-merge threshold (#274). A staged run shorter than this is "noise": the WHOOP 5/MG
+    /// banks sparse motion, so the stager emits sub-minute stage flecks and the hypnogram reads
+    /// choppier than WHOOP's. 3 min is conservative — long enough to clear fleck noise, short enough
+    /// to leave a genuine stage transition (a real deep/REM block runs many minutes) untouched.
+    public static let fragmentMergeMin: Double = 3.0
+    /// fragmentMergeMin expressed in 30 s epochs (6). A run with < this many epochs merges.
+    public static let fragmentMergeEpochs: Int = Int((fragmentMergeMin * 60.0 / epochS).rounded())
+
+    /// Sleep-depth rank, lighter → deeper: wake 0, light 1, rem 2, deep 3. Used by mergeFragments to
+    /// bias an ambiguous merge toward the LIGHTER stage so smoothing can never inflate deep/REM.
+    static func stageDepthRank(_ stage: String) -> Int {
+        switch stage {
+        case "light": return 1
+        case "rem":   return 2
+        case "deep":  return 3
+        default:      return 0  // "wake" and any unexpected label
+        }
+    }
+
+    /// Display/scoring smoothing of the staged label sequence (#274). Absorbs sub-threshold "noise"
+    /// runs WITHOUT erasing real transitions — applied AFTER staging, it never touches the per-epoch
+    /// HMM detection. Ties bias toward the lighter neighbour so a stray fleck can never inflate deep/REM.
+    static func mergeFragments(_ labels: [String], thresholdEpochs: Int = fragmentMergeEpochs) -> [String] {
+        let n = labels.count
+        if n == 0 || thresholdEpochs <= 1 { return labels }
+
+        // Collapse the per-epoch labels into contiguous runs of (stage, length).
+        var runs: [(stage: String, len: Int)] = []
+        for s in labels {
+            if let last = runs.last, last.stage == s { runs[runs.count - 1].len += 1 }
+            else { runs.append((stage: s, len: 1)) }
+        }
+        if runs.count < 2 { return labels }
+
+        var merged: [(stage: String, len: Int)] = []
+        var i = 0
+        while i < runs.count {
+            let current = runs[i]
+            if current.len >= thresholdEpochs { merged.append(current); i += 1; continue }
+
+            let hasPrev = !merged.isEmpty
+            let hasNext = i + 1 < runs.count
+
+            if hasPrev && hasNext && merged[merged.count - 1].stage == runs[i + 1].stage {
+                // Same-stage bridge: absorb the fleck and the next run into the previous one.
+                merged[merged.count - 1].len += current.len + runs[i + 1].len
+                i += 2
+            } else if hasPrev && hasNext {
+                // Between two DIFFERENT stages: relabel to the dominant neighbour, biasing
+                // toward the lighter stage when the two neighbours are tied in length.
+                let prev = merged[merged.count - 1]
+                let next = runs[i + 1]
+                let winner: String
+                if prev.len > next.len { winner = prev.stage }
+                else if next.len > prev.len { winner = next.stage }
+                else { winner = stageDepthRank(prev.stage) <= stageDepthRank(next.stage) ? prev.stage : next.stage }
+                if winner == prev.stage {
+                    merged[merged.count - 1].len += current.len
+                    i += 1
+                } else {
+                    runs[i + 1] = (stage: next.stage, len: next.len + current.len)
+                    i += 1
+                }
+            } else if hasNext {
+                // Leading fleck: fold forward into the next run.
+                runs[i + 1] = (stage: runs[i + 1].stage, len: runs[i + 1].len + current.len)
+                i += 1
+            } else if hasPrev {
+                // Trailing fleck: fold back into the previous run.
+                merged[merged.count - 1].len += current.len
+                i += 1
+            } else {
+                merged.append(current)
+                i += 1
+            }
+        }
+
+        // Re-expand the runs back into a per-epoch label sequence of the same length.
+        var out: [String] = []
+        out.reserveCapacity(n)
+        for r in merged { out.append(contentsOf: repeatElement(r.stage, count: r.len)) }
         return out
     }
 

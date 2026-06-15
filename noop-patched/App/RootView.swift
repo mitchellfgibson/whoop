@@ -19,6 +19,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
     case appleHealth = "Apple Health"
     case dataSources = "Data Sources"
     case notifications = "Notifications"
+    case smartAlarm = "Smart alarm"
     case automation = "Automations"
     case settings = "Settings"
     case support = "Support"
@@ -47,6 +48,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .dataSources: return "Data Sources"
         case .notifications: return "Notifications"
         case .automation: return "Automations"
+        case .smartAlarm: return "Smart alarm"
         case .settings: return "Settings"
         case .support: return "Support"
         }
@@ -71,6 +73,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .appleHealth: return "heart.fill"
         case .dataSources: return "square.and.arrow.down.fill"
         case .notifications: return "bell.badge.fill"
+        case .smartAlarm: return "alarm.fill"
         case .automation: return "wand.and.stars"
         case .settings: return "gearshape.fill"
         case .support: return "heart.fill"
@@ -91,7 +94,7 @@ struct RootView: View {
     private static let sidebarItems: [NavItem] = [
         .today, .sleep, .workouts, .stress,
         .intelligence, .insights, .explore,
-        .notifications, .automation, .settings,
+        .notifications, .smartAlarm, .automation, .settings,
     ]
 
     var body: some View {
@@ -135,7 +138,7 @@ struct RootView: View {
         case .live: LiveView()
         case .breathe: BreathingView()
         case .intervals: IntervalTimerView()
-        case .explore: ExploreHubView()
+        case .explore: MetricExplorerView()
         case .compare: CompareView()
         case .insights: InsightsView()
         case .sleep: SleepView()
@@ -146,6 +149,7 @@ struct RootView: View {
         case .appleHealth: AppleHealthView()
         case .dataSources: DataSourcesView()
         case .notifications: NotificationSettingsView()
+        case .smartAlarm: SmartAlarmView()
         case .automation: AutomationsView()
         case .settings: SettingsView()
         case .support: SupportView()
