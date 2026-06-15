@@ -19,6 +19,11 @@ struct SettingsView: View {
     @State private var liveHRUpTo: Date?
     @State private var healthUpTo: Date?
 
+    /// Raw-sensor CSV export (experimental diagnostic, ported from v2.18.0). Holds the last-written
+    /// file so macOS can "Reveal in Finder" after a save, mirroring the puffin-capture export.
+    @State private var rawCsvBusy = false
+    @State private var lastRawCsvURL: URL?
+
     /// Backup & restore UI state.
     @State private var backupBusy = false
     @State private var backupAlertTitle = ""
@@ -416,6 +421,9 @@ struct SettingsView: View {
                 Text(strapStatusDetail)
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
+
+                capabilityBlock
+
                 HStack(spacing: 12) {
                     Button {
                         model.scan()
@@ -437,6 +445,41 @@ struct SettingsView: View {
                     .disabled(!live.connected && !live.bonded)
                 }
             }
+        }
+    }
+
+    /// PATCH (v3.9.0 honesty port): an honest, per-model summary of what THIS band actually
+    /// captures and what NOOP uses it for — so the UI never implies a sensor the strap doesn't
+    /// have. Crucially this DROPS the misleading "Blood oxygen" chip: no SpO₂ % ever comes off a
+    /// WHOOP strap over BLE (raw red/IR only — see the device-capability audit), so a real % is
+    /// import-only. Adapted from upstream DevicesView's DeviceCapabilityProfile; this app targets
+    /// WHOOP 5/MG, so the profile is derived directly rather than from a PairedDevice registry.
+    private var capabilityBlock: some View {
+        let p = DeviceCapabilityProfile.whoop5
+        return VStack(alignment: .leading, spacing: 8) {
+            Divider().background(StrandPalette.hairline)
+            Text(p.displayModel)
+                .font(StrandFont.subhead.weight(.semibold))
+                .foregroundStyle(StrandPalette.textPrimary)
+            capabilityRow(symbol: "waveform.path.ecg", text: p.captures)
+            capabilityRow(symbol: "bolt.fill", text: p.powers)
+            Text(p.footnote)
+                .font(.system(size: 11))
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func capabilityRow(symbol: String, text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 11))
+                .foregroundStyle(StrandPalette.accent)
+                .frame(width: 14)
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -562,6 +605,98 @@ struct SettingsView: View {
                         #endif
                         Spacer(minLength: 0)
                     }
+                }
+
+                Divider().overlay(StrandPalette.hairline)
+
+                // MARK: Export raw sensor data (CSV) — a read-only diagnostic over the decoded streams
+                // NOOP already stores (HR, R-R, motion, steps, PPG-HR, SpO₂ red/IR, skin temp, resp,
+                // events). Ported from v2.18.0 (#308/#276/#322). This is the instrument for inspecting
+                // — and reverse-engineering — the raw SpO₂ red/IR register that today comes off empty.
+                Button {
+                    exportRawSensorCSV()
+                } label: {
+                    if rawCsvBusy {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Exporting…")
+                        }
+                        .padding(.horizontal, 6)
+                    } else {
+                        Label("Export raw sensor data (CSV)", systemImage: "square.and.arrow.up")
+                            .padding(.horizontal, 6)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(StrandPalette.accent)
+                .disabled(rawCsvBusy)
+
+                #if os(macOS)
+                if let url = lastRawCsvURL {
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                    } label: {
+                        Label("Reveal in Finder", systemImage: "folder")
+                            .padding(.horizontal, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(StrandPalette.accent)
+                }
+                #endif
+
+                Text("Dumps the last 24 hours of decoded per-sample sensor streams (heart rate, R-R, motion, steps, SpO₂ red/IR, skin temperature, respiration, events) to a single CSV — all on-device, nothing uploaded. Share it to prototype and test sleep, activity and strength algorithms.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Export the last 24h of decoded sensor streams for the strap to a CSV, then save (macOS
+    /// NSSavePanel) or share (iOS share sheet) — the same pattern as exportPuffinCaptures().
+    private func exportRawSensorCSV() {
+        rawCsvBusy = true
+        Task {
+            let since = Date().timeIntervalSince1970 - 24 * 60 * 60
+            guard let store = await model.repo.storeHandle() else {
+                await MainActor.run {
+                    rawCsvBusy = false
+                    backupAlertTitle = "Export failed"
+                    backupAlertMessage = "Couldn't open the local store."
+                    showBackupAlert = true
+                }
+                return
+            }
+            do {
+                let url = try await store.exportRawCSV(deviceId: model.deviceId, since: since)
+                await MainActor.run {
+                    rawCsvBusy = false
+                    lastRawCsvURL = url
+                    #if os(macOS)
+                    let panel = NSSavePanel()
+                    panel.allowedContentTypes = [.commaSeparatedText]
+                    panel.nameFieldStringValue = url.lastPathComponent
+                    panel.canCreateDirectories = true
+                    guard panel.runModal() == .OK, let dest = panel.url else { return }
+                    let fm = FileManager.default
+                    do {
+                        if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+                        try fm.copyItem(at: url, to: dest)
+                    } catch {
+                        backupAlertTitle = "Export failed"
+                        backupAlertMessage = error.localizedDescription
+                        showBackupAlert = true
+                    }
+                    #else
+                    FileExport.exportFile(at: url)
+                    #endif
+                }
+            } catch {
+                await MainActor.run {
+                    rawCsvBusy = false
+                    backupAlertTitle = "Export failed"
+                    backupAlertMessage = error.localizedDescription
+                    showBackupAlert = true
                 }
             }
         }
@@ -931,6 +1066,28 @@ private struct FormRow<Control: View>: View {
         }
         .frame(minHeight: 32)
     }
+}
+
+// MARK: - Device capability profile (v3.9.0 honesty port)
+
+/// Honest, per-model summary of what a WHOOP band actually captures over BLE and what NOOP uses it
+/// for — shown on the Settings strap card. Ported from upstream's DevicesView. The key honesty fix:
+/// there is NO "Blood oxygen" capture here, because no SpO₂ % ever comes off a WHOOP strap over the
+/// air (raw red/IR registers only, and even those aren't reliably present on 5/MG v18 frames — see
+/// the SpO₂ capability audit). A real SpO₂ % is import-only. "*" marks on-device estimates, not live
+/// sensors. This app pairs only with WHOOP 5/MG, so the single `.whoop5` profile is all it needs.
+struct DeviceCapabilityProfile {
+    let displayModel: String   // clean subtitle
+    let captures: String       // "·"-joined honest capture labels for THIS model
+    let powers: String         // the NOOP scores / screens this device drives
+    let footnote: String       // one short honest caveat line ("*" estimates + the SpO₂ note)
+
+    static let whoop5 = DeviceCapabilityProfile(
+        displayModel: "WHOOP 5.0 / MG",
+        captures: "Heart rate · HRV · Skin temp* · Resp rate* · Steps* · Sleep · Strain · Battery",
+        powers: "Powers Charge, Effort, Rest, Sleep + Health Monitor",
+        footnote: "* on-device estimate — skin temp is a nightly ±°C deviation, steps are a raw motion count. "
+            + "No SpO₂ % comes off the strap (raw red/IR only); import a WHOOP CSV for a real blood-oxygen %.")
 }
 
 // MARK: - Preview
