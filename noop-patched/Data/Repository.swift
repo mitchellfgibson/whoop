@@ -138,7 +138,6 @@ final class Repository: ObservableObject {
         self.days = Self.mergeDaily(imported: imported, computed: computed)
         self.sleeps = Self.mergeSleep(imported: impSleep, computed: compSleep)
         self.loaded = true
-        self.refreshSeq += 1
 
         // PATCH (live front-page metrics): the long-format metricSeries table — which the
         // Explore screen and per-metric trends read — was only ever written by the WHOOP
@@ -147,7 +146,11 @@ final class Repository: ObservableObject {
         // Project the COMPUTED daily metrics (rolled up from the live strap) into
         // metricSeries under the computed source so recent days read live. Old days stay
         // covered by the imported source (series() merges computed-over-imported).
+        // IMPORTANT: this MUST complete BEFORE bumping refreshSeq, so Explore's
+        // .task(id: refreshSeq) reads the freshly-written rows (not the stale ones).
         await projectComputedMetricSeries(store: store, computed: computed, computedSleep: compSleep)
+
+        self.refreshSeq += 1
     }
 
     /// Write the live computed daily values into the long-format metricSeries table (under
@@ -208,12 +211,29 @@ final class Repository: ObservableObject {
         return (try? await store.hrSamples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
     }
 
-    /// PATCH: newest strap-data timestamp (latest HR sample) — for the Settings
-    /// "Data up to" footer. nil when no strap data has been captured yet.
-    func latestStrapDataTime() async -> Date? {
-        guard let store = await ensureStore() else { return nil }
-        guard let ts = (try? await store.latestHRSampleTs(deviceId: deviceId)) ?? nil else { return nil }
-        return Date(timeIntervalSince1970: TimeInterval(ts))
+    /// PATCH: data-freshness for the Settings footer. Returns:
+    ///  - liveHR: newest live HR sample (streams continuously while worn) — proves the
+    ///    strap link, but is NOT a measure of processed/sleep data.
+    ///  - health: newest day that has a COMPUTED daily metric (RHR/HRV/recovery/sleep) —
+    ///    this is the real "your health data is current through" date, which lags live HR
+    ///    because it needs the overnight offload + nightly rollup.
+    func dataFreshness() async -> (liveHR: Date?, health: Date?) {
+        guard let store = await ensureStore() else { return (nil, nil) }
+        let hrTs = (try? await store.latestHRSampleTs(deviceId: deviceId)) ?? nil
+        let live = hrTs.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        // Newest computed daily-metric day (the offload-derived health data).
+        let now = Date()
+        let fromDay = Self.dayString(now.addingTimeInterval(-60 * 86_400))
+        let toDay = Self.dayString(now.addingTimeInterval(86_400))
+        let computed = (try? await store.dailyMetrics(deviceId: computedDeviceId, from: fromDay, to: toDay)) ?? []
+        let healthDay = computed.compactMap { $0.restingHr != nil || $0.avgHrv != nil ? $0.day : nil }.max()
+        let health = healthDay.flatMap { Self.parseDayToDate($0) }
+        return (live, health)
+    }
+
+    private static func parseDayToDate(_ day: String) -> Date? {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX")
+        return f.date(from: day)
     }
 
     /// Downsampled HR (mean bpm per `bucketSeconds`) for the strap, for a Today/24h trend chart.

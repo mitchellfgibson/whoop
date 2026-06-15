@@ -13,8 +13,11 @@ struct SettingsView: View {
     @EnvironmentObject var live: LiveState
     @EnvironmentObject var profile: ProfileStore
     @EnvironmentObject var repo: Repository
-    /// PATCH: latest strap-data timestamp for the "Data up to" footer.
-    @State private var dataUpTo: Date?
+    /// PATCH: data-freshness for the footer — liveHR proves the strap link is current,
+    /// health is the newest day with computed recovery/sleep (it lags behind live HR
+    /// because it needs the overnight offload + nightly rollup).
+    @State private var liveHRUpTo: Date?
+    @State private var healthUpTo: Date?
 
     /// Backup & restore UI state.
     @State private var backupBusy = false
@@ -60,7 +63,11 @@ struct SettingsView: View {
             aboutCard
             dataFooter
         }
-        .task(id: repo.refreshSeq) { dataUpTo = await repo.latestStrapDataTime() }
+        .task(id: repo.refreshSeq) {
+            let f = await repo.dataFreshness()
+            liveHRUpTo = f.liveHR
+            healthUpTo = f.health
+        }
         .alert(backupAlertTitle, isPresented: $showBackupAlert) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -73,36 +80,53 @@ struct SettingsView: View {
 
     // MARK: - Data footer (PATCH)
 
-    /// Two small data points at the bottom: how current the strap data is, and the
-    /// sync state (a live "Syncing…" with chunk count while the history offload runs,
-    /// else "Up to date" / "Idle").
+    /// Three small data points at the bottom:
+    ///  1. Live HR — proves the strap link is current (streams while worn).
+    ///  2. Health data — the newest day with computed recovery/sleep. This is the honest
+    ///     "your processed data is current through" date; it lags live HR because it needs
+    ///     the overnight offload + nightly rollup. (Previously this row showed live HR and
+    ///     so falsely read "present" even when sleep hadn't updated.)
+    ///  3. Sync state — live "Syncing…" with chunk count, else "Up to date" / "Idle".
     private var dataFooter: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 11))
-                    .foregroundStyle(StrandPalette.textTertiary)
-                Text("Data up to \(dataUpToText)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(StrandPalette.textSecondary)
-            }
-            HStack(spacing: 6) {
-                Image(systemName: live.backfilling ? "arrow.triangle.2.circlepath" : "checkmark.circle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(live.backfilling ? StrandPalette.accent : StrandPalette.textTertiary)
-                Text(syncStateText)
-                    .font(.system(size: 12))
-                    .foregroundStyle(StrandPalette.textSecondary)
-            }
+            footerRow(icon: "bolt.heart",
+                      tint: StrandPalette.textTertiary,
+                      text: "Live HR up to \(freshnessText(liveHRUpTo, withTime: true))")
+            footerRow(icon: "heart.text.square",
+                      tint: healthIsStale ? StrandPalette.accent : StrandPalette.textTertiary,
+                      text: "Health data up to \(freshnessText(healthUpTo, withTime: false))")
+            footerRow(icon: live.backfilling ? "arrow.triangle.2.circlepath" : "checkmark.circle",
+                      tint: live.backfilling ? StrandPalette.accent : StrandPalette.textTertiary,
+                      text: syncStateText)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 4)
     }
 
-    private var dataUpToText: String {
-        guard let d = dataUpTo else { return "—" }
+    private func footerRow(icon: String, tint: Color, text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundStyle(tint)
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(StrandPalette.textSecondary)
+        }
+    }
+
+    /// Health data is "stale" (highlighted) when its newest day is more than ~36h behind
+    /// now — i.e. last night's sleep hasn't been offloaded + rolled up yet.
+    private var healthIsStale: Bool {
+        guard let d = healthUpTo else { return true }
+        return Date().timeIntervalSince(d) > 36 * 3600
+    }
+
+    /// Formats a freshness date. `withTime`: include clock time (live HR is precise to the
+    /// minute); health data is a day-granularity rollup so it shows the date only.
+    private func freshnessText(_ date: Date?, withTime: Bool) -> String {
+        guard let d = date else { return "—" }
         let f = DateFormatter()
-        f.dateFormat = "EEE d MMM, h:mm a"
+        f.dateFormat = withTime ? "EEE d MMM, h:mm a" : "EEE d MMM"
         let mins = Int(Date().timeIntervalSince(d) / 60)
         let rel = mins < 2 ? "now" : mins < 60 ? "\(mins) min ago"
             : mins < 1440 ? "\(mins/60)h ago" : "\(mins/1440)d ago"
