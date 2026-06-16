@@ -283,8 +283,11 @@ struct SettingsView: View {
             return c > 0 ? "Syncing history… \(c) chunks pulled" : "Syncing history…"
         }
         if !live.connected { return "Sync: strap not connected" }
-        if !live.bonded { return "Sync: live HR only (not fully paired)" }
-        // Bonded + connected + not actively backfilling = caught up.
+        // History sync (sleep/recovery/sensors) needs the ENCRYPTED bond — NOT just `bonded`, which a
+        // 5/MG also sets when HR streams over the unbonded standard profile (#69). So "streaming" can
+        // be true while sync is impossible; say that plainly instead of "idle/up to date".
+        if !live.encryptedBond { return "Sync: live HR only — history needs full pairing" }
+        // Encrypted-bonded + connected + not actively backfilling = caught up.
         if let last = live.lastSyncedAt {
             let mins = Int(Date().timeIntervalSince1970 - last) / 60
             return mins < 5 ? "Sync: up to date ✓" : "Sync: idle (last \(mins < 60 ? "\(mins) min" : "\(mins/60)h") ago)"
@@ -589,9 +592,12 @@ struct SettingsView: View {
     }
 
     private var strapStatusTitle: String {
-        if live.bonded && live.connected { return "Bonded · streaming" }
+        // encryptedBond = the real bond that history sync needs. `bonded` alone (no encryptedBond) is
+        // the live-HR-over-standard-profile case on a 5/MG (#69) — streaming HR, but can't sync history.
+        if live.encryptedBond && live.connected { return "Paired · syncing" }
+        if live.bonded && live.connected { return "Live HR only · streaming" }
         if live.connected { return "Connected" }
-        if live.bonded { return "Bonded · idle" }
+        if live.encryptedBond { return "Paired · idle" }
         return "Disconnected"
     }
 
@@ -602,8 +608,11 @@ struct SettingsView: View {
     }
 
     private var strapStatusDetail: String {
+        if live.encryptedBond && live.connected {
+            return "Fully paired — live heart rate plus history sync (sleep, recovery, sensors)."
+        }
         if live.bonded && live.connected {
-            return "Your strap is paired and sending data. Open Live for a real-time heart rate."
+            return "Live heart rate is streaming, but the strap isn't fully (encrypted) paired, so sleep & recovery history can't sync. Tap the band to its blue LEDs and re-scan to complete pairing."
         }
         if live.connected, let hint = live.pairingHint { return hint }
         if live.connected { return "Connected. Finishing the secure pairing handshake…" }
