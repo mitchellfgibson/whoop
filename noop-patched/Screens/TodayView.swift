@@ -65,9 +65,11 @@ struct TodayView: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: "Control Center", subtitle: "\(dateLine)") {
+        ScreenScaffold(title: "\(dateLine)", subtitle: nil) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 dataScopeToggle
+                // Three-ring header (Sleep · Recovery · Strain) — the WHOOP-style glance.
+                threeRingHero
                 HealthAlertBanner()
                 // Sync progress, front and center — shows a ring + how far behind the offload is,
                 // and DISAPPEARS automatically once sleep/sensor data is caught up. (See TodaySyncBanner.)
@@ -178,6 +180,46 @@ struct TodayView: View {
     }
 
     // MARK: (a) HERO — RecoveryRing + Synthesis, filling the width equally.
+
+    // MARK: - Three-ring hero (Sleep · Recovery · Strain)
+
+    /// Today's sleep performance % — the imported WHOOP figure when present, else derived from the
+    /// night's efficiency. Mirrors SleepView's performanceSeries source so the ring matches that screen.
+    private var sleepPerformancePct: Double? {
+        if let day = repo.today?.day, let p = repo.importedSleep[day]?.performancePct { return p }
+        return repo.today?.efficiency   // efficiency (0–100) is a sensible live-strap proxy
+    }
+
+    /// The WHOOP-style three-ring header: Sleep / Recovery / Strain as compact circular gauges.
+    private var threeRingHero: some View {
+        let d = repo.today
+        let sleep = sleepPerformancePct
+        let recovery = d?.recovery
+        let strain = d?.strain
+        return HStack(spacing: 0) {
+            GaugeRing(title: "SLEEP",
+                      value: sleep, unit: "%",
+                      fraction: sleep.map { $0 / 100 },
+                      tint: StrandPalette.accent)
+            GaugeRing(title: "RECOVERY",
+                      value: recovery, unit: "%",
+                      fraction: recovery.map { $0 / 100 },
+                      tint: recoveryTint(recovery))
+            GaugeRing(title: "STRAIN",
+                      value: strain, unit: "",
+                      fraction: strain.map { min(max($0 / 21.0, 0), 1) },
+                      tint: StrandPalette.strain066,
+                      decimals: 1)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func recoveryTint(_ pct: Double?) -> Color {
+        guard let p = pct else { return StrandPalette.textTertiary }
+        if p >= 67 { return StrandPalette.recovery100 }
+        if p >= 34 { return StrandPalette.recovery030 }
+        return StrandPalette.recovery000
+    }
 
     @ViewBuilder
     private var heroSection: some View {
@@ -790,6 +832,50 @@ private struct TodaySyncBanner: View {
                 Spacer(minLength: 0)
             }
         }
+    }
+}
+
+// MARK: - Gauge ring (three-ring hero element)
+
+/// One compact labelled circular gauge for the WHOOP-style Sleep/Recovery/Strain header. Shows the
+/// value big in the center with a colored arc for `fraction` (0…1); a dash when the value is nil
+/// (not yet computed). Equal-width so three sit evenly across the row.
+private struct GaugeRing: View {
+    let title: String
+    let value: Double?
+    let unit: String
+    let fraction: Double?
+    let tint: Color
+    var decimals: Int = 0
+
+    private var valueText: String {
+        guard let v = value else { return "—" }
+        let n = decimals == 0 ? String(Int(v.rounded())) : String(format: "%.\(decimals)f", v)
+        return n + unit
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                Circle().stroke(StrandPalette.hairline, lineWidth: 8)
+                Circle()
+                    .trim(from: 0, to: CGFloat(min(max(fraction ?? 0, 0), 1)))
+                    .stroke(tint, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeInOut(duration: 0.5), value: fraction ?? 0)
+                Text(valueText)
+                    .font(.system(size: 22, weight: .bold)).monospacedDigit()
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .minimumScaleFactor(0.6)
+                    .lineLimit(1)
+            }
+            .frame(width: 92, height: 92)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(StrandPalette.textSecondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
