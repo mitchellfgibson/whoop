@@ -71,12 +71,6 @@ struct TodayView: View {
                 // Sync progress, front and center — shows a ring + how far behind the offload is,
                 // and DISAPPEARS automatically once sleep/sensor data is caught up. (See TodaySyncBanner.)
                 TodaySyncBanner()
-                if repo.today?.recovery == nil {
-                    DataPendingNote(
-                        title: "Live now. Your scores are building.",
-                        message: "Your live heart rate is working from the strap, and charge, effort and rest build from it over your next few nights of wear, sharpening as it learns your baseline. Want your full history instantly? Import your WHOOP export in Data Sources and it backfills in about a minute."
-                    )
-                }
                 heroSection
                 heartRateTrendSection
                 readinessSection
