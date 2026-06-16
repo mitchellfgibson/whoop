@@ -9,11 +9,13 @@ struct RootTabView: View {
     @EnvironmentObject private var repo: Repository
 
     var body: some View {
+        // Tabs mirror the Mac sidebar's curated top items (Today, Sleep, Workouts, Stress); the macOS
+        // build folds Live into the bottom of Today, so it isn't a separate tab here either.
         TabView {
             tab(TodayView(), "Today", "circle.hexagongrid.fill")
-            tab(TrendsView(), "Trends", "chart.xyaxis.line")
-            tab(LiveView(), "Live", "waveform.path.ecg")
             tab(SleepView(), "Sleep", "bed.double.fill")
+            tab(WorkoutsView(), "Workouts", "figure.run")
+            tab(StressView(), "Stress", "bolt.heart.fill")
             moreTab
         }
         .tint(StrandPalette.accent)
@@ -28,21 +30,17 @@ struct RootTabView: View {
     }
 
     private var moreTab: some View {
+        // Mirrors the Mac sidebar curation: only the items you kept. Removed entirely (as on Mac):
+        // Coach, Breathe, Intervals, Compare. Health is reachable here; Live folds into Today.
         NavigationStack {
             List {
                 Section("Insights") {
                     link("Intelligence", "brain.head.profile") { IntelligenceView() }
-                    link("Coach", "sparkles") { CoachView() }
                     link("Insights", "lightbulb.fill") { InsightsView() }
                     link("Explore", "square.grid.2x2.fill") { MetricExplorerView() }
-                    link("Compare", "rectangle.split.2x1.fill") { CompareView() }
                 }
                 Section("Body") {
-                    link("Workouts", "figure.run") { WorkoutsView() }
                     link("Health", "heart.text.square.fill") { HealthView() }
-                    link("Stress", "bolt.heart.fill") { StressView() }
-                    link("Breathe", "wind") { BreathingView() }
-                    link("Intervals", "timer") { IntervalTimerView() }
                 }
                 Section("Data") {
                     link("Apple Health", "heart.fill") { AppleHealthView() }
@@ -52,6 +50,9 @@ struct RootTabView: View {
                     link("Shortcuts Export", "square.and.arrow.up.fill") { ShortcutExportSettingsView() }
                 }
                 Section("App") {
+                    // (Notifications is macOS-only — NotificationSettingsView uses AppKit/NSWorkspace
+                    //  for real app icons. DataSources, which you folded into it on Mac, is in the
+                    //  Data section above, so the substance is still reachable on iPhone.)
                     link("Automations", "wand.and.stars") { AutomationsView() }
                     link("Smart alarm", "alarm.fill") { SmartAlarmView() }
                     link("Settings", "gearshape.fill") { SettingsView() }
