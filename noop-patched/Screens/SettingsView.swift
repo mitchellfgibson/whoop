@@ -19,6 +19,12 @@ struct SettingsView: View {
     @State private var liveHRUpTo: Date?
     @State private var healthUpTo: Date?
 
+    /// Sync-progress ring state. The WHOOP offload protocol never reports a total chunk count, so a
+    /// true "% of chunks" is unknowable. Instead we measure HONEST progress as how far the health-data
+    /// freshness gap has closed since this sync began: `syncStartGapDays` is the gap (days behind) the
+    /// moment backfilling started; the ring fills as the current gap shrinks toward 0 (caught up).
+    @State private var syncStartGapDays: Int?
+
     /// Raw-sensor CSV export (experimental diagnostic, ported from v2.18.0). Holds the last-written
     /// file so macOS can "Reveal in Finder" after a save, mirroring the puffin-capture export.
     @State private var rawCsvBusy = false
@@ -72,6 +78,19 @@ struct SettingsView: View {
             let f = await repo.dataFreshness()
             liveHRUpTo = f.liveHR
             healthUpTo = f.health
+            updateSyncStartGap()
+        }
+        // Snapshot the starting gap when a sync begins/ends, so the ring measures progress from there.
+        .onChange(of: live.backfilling) { _ in updateSyncStartGap() }
+        // Re-pull freshness each time another chunk lands so the ring advances live during a sync
+        // (healthUpTo otherwise only updates on a full repo refresh).
+        .onChange(of: live.syncChunksThisSession) { _ in
+            Task {
+                let f = await repo.dataFreshness()
+                liveHRUpTo = f.liveHR
+                healthUpTo = f.health
+                updateSyncStartGap()
+            }
         }
         .alert(backupAlertTitle, isPresented: $showBackupAlert) {
             Button("OK", role: .cancel) { }
@@ -93,31 +112,109 @@ struct SettingsView: View {
     ///     so falsely read "present" even when sleep hadn't updated.)
     ///  3. Sync state — live "Syncing…" with chunk count, else "Up to date" / "Idle".
     private var dataFooter: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Headline: how far behind the sync is, in plain words, always visible so you
-            // never have to ask. Green when caught up, accent when behind.
-            HStack(spacing: 7) {
-                Image(systemName: behindHeadline.caughtUp ? "checkmark.circle.fill" : "clock.badge.exclamationmark.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(behindHeadline.caughtUp ? StrandPalette.recovery100 : StrandPalette.statusWarning)
-                Text(behindHeadline.text)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textPrimary)
+        HStack(alignment: .top, spacing: 16) {
+            // Progress ring — the % of the sync's freshness gap that has been closed.
+            syncProgressRing
+
+            VStack(alignment: .leading, spacing: 8) {
+                // Headline: how far behind the sync is, in plain words, always visible so you
+                // never have to ask. Green when caught up, accent when behind.
+                HStack(spacing: 7) {
+                    Image(systemName: behindHeadline.caughtUp ? "checkmark.circle.fill" : "clock.badge.exclamationmark.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(behindHeadline.caughtUp ? StrandPalette.recovery100 : StrandPalette.statusWarning)
+                    Text(behindHeadline.text)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    footerRow(icon: "bolt.heart",
+                              tint: StrandPalette.textTertiary,
+                              text: "Live HR up to \(freshnessText(liveHRUpTo, withTime: true))")
+                    footerRow(icon: "heart.text.square",
+                              tint: healthIsStale ? StrandPalette.accent : StrandPalette.textTertiary,
+                              text: "Health data up to \(freshnessText(healthUpTo, withTime: false))")
+                    footerRow(icon: live.backfilling ? "arrow.triangle.2.circlepath" : "checkmark.circle",
+                              tint: live.backfilling ? StrandPalette.accent : StrandPalette.textTertiary,
+                              text: syncStateText)
+                }
             }
-            VStack(alignment: .leading, spacing: 6) {
-                footerRow(icon: "bolt.heart",
-                          tint: StrandPalette.textTertiary,
-                          text: "Live HR up to \(freshnessText(liveHRUpTo, withTime: true))")
-                footerRow(icon: "heart.text.square",
-                          tint: healthIsStale ? StrandPalette.accent : StrandPalette.textTertiary,
-                          text: "Health data up to \(freshnessText(healthUpTo, withTime: false))")
-                footerRow(icon: live.backfilling ? "arrow.triangle.2.circlepath" : "checkmark.circle",
-                          tint: live.backfilling ? StrandPalette.accent : StrandPalette.textTertiary,
-                          text: syncStateText)
-            }
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, 4)
+    }
+
+    // MARK: - Sync progress ring
+
+    /// A circular progress indicator with a "% updated" readout in the center. HONEST source: the
+    /// WHOOP offload never reports a total chunk count, so a true "% of bytes/chunks" can't exist.
+    /// Instead the fraction is how far the health-data freshness GAP has closed since this sync began
+    /// — 0 % at the moment a sync starts N days behind, 100 % when it reaches "caught up". When there
+    /// is no active sync it shows the current standing (100 % caught up, else the closed fraction).
+    private var syncProgressRing: some View {
+        let p = syncProgress
+        return VStack(spacing: 4) {
+            ZStack {
+                Circle()
+                    .stroke(StrandPalette.hairline, lineWidth: 6)
+                Circle()
+                    .trim(from: 0, to: p.fraction)
+                    .stroke(p.tint, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .animation(.easeInOut(duration: 0.4), value: p.fraction)
+                VStack(spacing: 0) {
+                    Text("\(Int((p.fraction * 100).rounded()))%")
+                        .font(.system(size: 16, weight: .semibold)).monospacedDigit()
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Text("updated")
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+            }
+            .frame(width: 64, height: 64)
+            if live.backfilling {
+                Text("\(live.syncChunksThisSession) chunks")
+                    .font(.system(size: 9, weight: .medium)).monospacedDigit()
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+        }
+    }
+
+    /// The ring fraction + tint. `daysBehind` now vs. `syncStartGapDays` (the gap when this sync
+    /// began): fraction = 1 − behind/start. Caught up → 1.0 (green). No sync running and already
+    /// caught up → full green ring. No data yet → empty.
+    private var syncProgress: (fraction: Double, tint: Color) {
+        let caughtUp = StrandPalette.recovery100
+        let active = StrandPalette.accent
+        guard let health = healthUpTo else { return (0, StrandPalette.statusWarning) }
+        let cal = Calendar.current
+        let yesterday = cal.startOfDay(for: Date()).addingTimeInterval(-86_400)
+        let behind = max(0, cal.dateComponents([.day], from: cal.startOfDay(for: health), to: yesterday).day ?? 0)
+        if behind <= 0 { return (1.0, caughtUp) }              // caught up through yesterday
+        guard let start = syncStartGapDays, start > 0 else {
+            // No sync has started this session — show a small sliver so the ring isn't bare,
+            // representing "not yet started catching up".
+            return (0.04, live.backfilling ? active : StrandPalette.statusWarning)
+        }
+        let closed = Double(start - behind) / Double(start)    // 0…1 of the original gap closed
+        return (min(max(closed, 0.0), 1.0), live.backfilling ? active : StrandPalette.statusWarning)
+    }
+
+    /// Snapshot the freshness gap when a sync STARTS, so the ring measures progress from there.
+    /// Called on each freshness refresh + on backfilling edges.
+    private func updateSyncStartGap() {
+        let cal = Calendar.current
+        let yesterday = cal.startOfDay(for: Date()).addingTimeInterval(-86_400)
+        let behind = healthUpTo.map { max(0, cal.dateComponents([.day], from: cal.startOfDay(for: $0), to: yesterday).day ?? 0) }
+        if live.backfilling {
+            // On the rising edge of a sync, capture the starting gap once (the larger of any prior
+            // baseline and the current gap, so a multi-day sync doesn't reset its denominator).
+            if let b = behind, b > 0 { syncStartGapDays = max(syncStartGapDays ?? 0, b) }
+        } else if (behind ?? 0) <= 0 {
+            // Caught up and idle → clear the baseline so the next sync measures fresh.
+            syncStartGapDays = nil
+        }
     }
 
     /// The one-glance "how far behind" headline. Measures the gap between the newest
