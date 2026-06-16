@@ -1,0 +1,235 @@
+name: Strand
+options:
+  bundleIdPrefix: com.noopapp
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+  # Base/development language. The in-source UI strings are authored in English (US);
+  # the String Catalog (Strand/Resources/Localizable.xcstrings) carries this as the
+  # source language and is where additional languages are added.
+  developmentLanguage: en
+settings:
+  base:
+    MARKETING_VERSION: "2.6.2"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    # Emit localizable strings so Xcode auto-extracts every LocalizedStringKey into the
+    # String Catalog on build (the English (US) base entries).
+    SWIFT_EMIT_LOC_STRINGS: YES
+    SWIFT_STRICT_CONCURRENCY: minimal
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    # Build for both Apple Silicon and Intel so the release runs on every Mac.
+    ARCHS: "$(ARCHS_STANDARD)"
+  configs:
+    Release:
+      # Distribution builds must produce a universal binary, not just the host arch.
+      ONLY_ACTIVE_ARCH: NO
+packages:
+  # Renders the Coach's LLM replies (GitHub-flavored Markdown — bold, lists,
+  # headings, tables). Pinned exactly for reproducible community builds.
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    exactVersion: 2.4.1
+  WhoopProtocol:
+    path: Packages/WhoopProtocol
+  WhoopStore:
+    path: Packages/WhoopStore
+  StrandAnalytics:
+    path: Packages/StrandAnalytics
+  StrandImport:
+    path: Packages/StrandImport
+  StrandDesign:
+    path: Packages/StrandDesign
+targets:
+  Strand:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - path: Strand
+        excludes:
+          - "Resources/Info.plist"
+          - "Resources/Strand.entitlements"
+    info:
+      path: Strand/Resources/Info.plist
+      properties:
+        CFBundleName: NOOP
+        CFBundleDisplayName: NOOP
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "78"
+        LSMinimumSystemVersion: "13.0"
+        LSApplicationCategoryType: public.app-category.healthcare-fitness
+        NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your Mac. Nothing leaves your device."
+        # The AI Coach's "Custom (OpenAI-compatible)" provider talks to a LOCAL LLM server over plain
+        # HTTP on loopback (Ollama / LM Studio / llama.cpp at http://localhost:…). ATS blocks cleartext
+        # by default; NSAllowsLocalNetworking exempts loopback/.local/unqualified hosts ONLY — public
+        # HTTPS endpoints are unaffected. No arbitrary-loads blanket exemption.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    entitlements:
+      path: Strand/Resources/Strand.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.device.bluetooth: true
+        com.apple.security.files.user-selected.read-write: true
+        # Outbound client access — used ONLY by the opt-in, consent-gated, BYOK AI Coach.
+        # The ad-hoc distributed build applies NO entitlements (unsigned build + ad-hoc
+        # re-sign), so this matters only for a SIGNED/sandboxed build (where the sandbox
+        # otherwise blocks the Coach's request — #128). Data path stays network-free.
+        com.apple.security.network.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop
+        PRODUCT_NAME: NOOP
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+        # Hardened Runtime closes the DYLD_INSERT_LIBRARIES injection vector for the
+        # distributed (ad-hoc) build. The app uses no JIT / unsigned-exec memory, so it's safe.
+        ENABLE_HARDENED_RUNTIME: YES
+        COMBINE_HIDPI_IMAGES: YES
+    dependencies:
+      - package: WhoopProtocol
+      - package: WhoopStore
+      - package: StrandAnalytics
+      - package: StrandImport
+      - package: StrandDesign
+      - package: MarkdownUI
+  StrandTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - StrandTests
+    dependencies:
+      - target: Strand
+      - package: WhoopProtocol
+      - package: WhoopStore
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.strandtests
+
+  # ---------------------------------------------------------------------------
+  # iOS app target (community build-from-source; never distributed via the App
+  # Store — NOOP stays anonymous). Reuses the five shared packages + most of the
+  # macOS app's Strand/ sources; the macOS-only scene/menu-bar/notification files
+  # are excluded, and the iOS app shell + HealthKit + widgets/intents live under
+  # StrandiOS/. See docs/IOS.md.
+  NOOPiOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Strand
+        excludes:
+          - "Resources/Info.plist"
+          - "Resources/Strand.entitlements"
+          - "Resources/Assets.xcassets"
+          - "App/StrandApp.swift"
+          - "App/RootView.swift"
+          # ContentView embeds RootView() (the macOS NavigationSplitView sidebar shell), which is
+          # excluded above — so ContentView cannot compile on iOS. The iOS shell is RootTabView,
+          # wired in StrandiOS/App/StrandiOSApp.swift (which reproduces ContentView's onboarding/
+          # Terms/What's-New gates around the TabView). Without this exclude the iOS target fails to
+          # resolve RootView().
+          - "App/ContentView.swift"
+          - "MenuBar"
+          - "Data/NotificationSettingsStore.swift"
+          - "Screens/NotificationSettingsView.swift"
+          # macOS-only AppIntents (BuzzStrap/MarkMoment) — iOS uses StrandiOS/System/NOOPAppIntents.swift.
+          # Without this exclude both compile into the iOS target and collide on NOOPAppIntents.stringsdata.
+          - "System/NOOPAppIntents.swift"
+      - path: StrandiOS
+        excludes:
+          - "Resources/Info.plist"
+          - "Resources/NOOP.entitlements"
+      - path: StrandiOSShared
+    info:
+      path: StrandiOS/Resources/Info.plist
+      properties:
+        CFBundleName: NOOP
+        CFBundleDisplayName: NOOP
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSApplicationCategoryType: public.app-category.healthcare-fitness
+        UILaunchScreen: {}
+        NSSupportsLiveActivities: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - bluetooth-central
+        NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your iPhone. Nothing leaves your device."
+        NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Nothing leaves your device."
+        NSHealthUpdateUsageDescription: "NOOP writes the metrics it computes from your strap back into Apple Health, on-device and only when you allow it."
+        # #155: expose the app's Documents folder to Files/Shortcuts so the user's Siri Shortcut can
+        # read the opt-in noop_sync.txt drop file (Apple-Health-free export for sideloaded installs).
+        # Both keys are required for the folder to actually appear in Files.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+    entitlements:
+      path: StrandiOS/Resources/NOOP.entitlements
+      # PERSONAL-TEAM build (mitchygib): HealthKit dropped (a free Apple ID can't sign it);
+      # the app group is namespaced to this team's bundle so Xcode auto-registers it.
+      properties:
+        com.apple.security.application-groups:
+          - group.com.mitchygib.noop
+    settings:
+      base:
+        CURRENT_PROJECT_VERSION: "33"
+        PRODUCT_BUNDLE_IDENTIFIER: com.mitchygib.noop
+        DEVELOPMENT_TEAM: R4X6JDGYLF
+        CODE_SIGN_STYLE: Automatic
+        PRODUCT_NAME: NOOP
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_EMIT_LOC_STRINGS: YES
+    dependencies:
+      - package: WhoopProtocol
+      - package: WhoopStore
+      - package: StrandAnalytics
+      - package: StrandImport
+      - package: StrandDesign
+      - package: MarkdownUI
+      - target: NOOPiOSWidgets
+
+  # WidgetKit + Live Activity extension — the iOS analogue of the macOS menu-bar
+  # extra. Reads a tiny snapshot the app publishes into the shared App Group.
+  NOOPiOSWidgets:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: StrandiOSWidgets
+        excludes:
+          - "Info.plist"
+          - "NOOPWidgets.entitlements"
+      - path: StrandiOSShared
+    info:
+      path: StrandiOSWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: NOOP
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: StrandiOSWidgets/NOOPWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.mitchygib.noop
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mitchygib.noop.widgets
+        DEVELOPMENT_TEAM: R4X6JDGYLF
+        CODE_SIGN_STYLE: Automatic
+        PRODUCT_NAME: NOOPWidgets
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+    dependencies:
+      - package: StrandDesign
