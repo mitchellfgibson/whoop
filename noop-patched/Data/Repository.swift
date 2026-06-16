@@ -214,26 +214,20 @@ final class Repository: ObservableObject {
     /// PATCH: data-freshness for the Settings footer. Returns:
     ///  - liveHR: newest live HR sample (streams continuously while worn) — proves the
     ///    strap link, but is NOT a measure of processed/sleep data.
-    ///  - health: newest day that has a COMPUTED daily metric (RHR/HRV/recovery/sleep) —
-    ///    this is the real "your health data is current through" date, which lags live HR
-    ///    because it needs the overnight offload + nightly rollup.
+    ///  - health: the newest OFFLOAD-reach timestamp (max gravity/skin-temp ts). These streams
+    ///    arrive ONLY via the historical offload, never live, so this is the honest "how far the
+    ///    deep data (sleep, recovery, sensors) has actually reached." A gap to now means last
+    ///    night hasn't come down yet — even when live HR is current to the second. (Previously this
+    ///    was the day-KEY of the newest computed row, which snapped to a calendar day and so falsely
+    ///    read "caught up through yesterday" while last night's sleep was entirely missing.)
     func dataFreshness() async -> (liveHR: Date?, health: Date?) {
         guard let store = await ensureStore() else { return (nil, nil) }
         let hrTs = (try? await store.latestHRSampleTs(deviceId: deviceId)) ?? nil
         let live = hrTs.map { Date(timeIntervalSince1970: TimeInterval($0)) }
-        // Newest computed daily-metric day (the offload-derived health data).
-        let now = Date()
-        let fromDay = Self.dayString(now.addingTimeInterval(-60 * 86_400))
-        let toDay = Self.dayString(now.addingTimeInterval(86_400))
-        let computed = (try? await store.dailyMetrics(deviceId: computedDeviceId, from: fromDay, to: toDay)) ?? []
-        let healthDay = computed.compactMap { $0.restingHr != nil || $0.avgHrv != nil ? $0.day : nil }.max()
-        let health = healthDay.flatMap { Self.parseDayToDate($0) }
+        // The real offload reach: newest gravity/skin-temp sample (offload-only streams).
+        let offloadTs = (try? await store.latestOffloadTs(deviceId: deviceId)) ?? nil
+        let health = offloadTs.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         return (live, health)
-    }
-
-    private static func parseDayToDate(_ day: String) -> Date? {
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX")
-        return f.date(from: day)
     }
 
     /// Downsampled HR (mean bpm per `bucketSeconds`) for the strap, for a Today/24h trend chart.

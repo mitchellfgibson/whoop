@@ -20,10 +20,10 @@ struct SettingsView: View {
     @State private var healthUpTo: Date?
 
     /// Sync-progress ring state. The WHOOP offload protocol never reports a total chunk count, so a
-    /// true "% of chunks" is unknowable. Instead we measure HONEST progress as how far the health-data
-    /// freshness gap has closed since this sync began: `syncStartGapDays` is the gap (days behind) the
-    /// moment backfilling started; the ring fills as the current gap shrinks toward 0 (caught up).
-    @State private var syncStartGapDays: Int?
+    /// true "% of chunks" is unknowable. Instead we measure HONEST progress as how far the offload's
+    /// freshness gap has closed since this sync began: `syncStartGapHrs` is the gap (HOURS behind now)
+    /// the moment backfilling started; the ring fills as the current gap shrinks toward ~caught-up.
+    @State private var syncStartGapHrs: Double?
 
     /// Raw-sensor CSV export (experimental diagnostic, ported from v2.18.0). Holds the last-written
     /// file so macOS can "Reveal in Finder" after a save, mirroring the puffin-capture export.
@@ -131,9 +131,9 @@ struct SettingsView: View {
                     footerRow(icon: "bolt.heart",
                               tint: StrandPalette.textTertiary,
                               text: "Live HR up to \(freshnessText(liveHRUpTo, withTime: true))")
-                    footerRow(icon: "heart.text.square",
+                    footerRow(icon: "bed.double.fill",
                               tint: healthIsStale ? StrandPalette.accent : StrandPalette.textTertiary,
-                              text: "Health data up to \(freshnessText(healthUpTo, withTime: false))")
+                              text: "Sleep & sensors up to \(freshnessText(healthUpTo, withTime: true))")
                     footerRow(icon: live.backfilling ? "arrow.triangle.2.circlepath" : "checkmark.circle",
                               tint: live.backfilling ? StrandPalette.accent : StrandPalette.textTertiary,
                               text: syncStateText)
@@ -181,62 +181,71 @@ struct SettingsView: View {
         }
     }
 
-    /// The ring fraction + tint. `daysBehind` now vs. `syncStartGapDays` (the gap when this sync
-    /// began): fraction = 1 − behind/start. Caught up → 1.0 (green). No sync running and already
-    /// caught up → full green ring. No data yet → empty.
+    /// "Caught up" tolerance: the offload reach is allowed to trail now by up to this many hours and
+    /// still count as current. Sized to one normal wear cycle — you can't offload last night's sleep
+    /// until you next connect after waking, so a few morning hours behind is expected, not a backlog.
+    private static let caughtUpToleranceHrs: Double = 12.0
+
+    /// Hours the offload reach (deep data: sleep/sensors) trails NOW. This is the honest backlog —
+    /// it is NOT affected by live HR being current. nil when nothing has offloaded yet.
+    private var offloadHoursBehind: Double? {
+        healthUpTo.map { max(0, Date().timeIntervalSince($0) / 3600.0) }
+    }
+
+    /// The ring fraction + tint. fraction = how far the offload's HOUR gap has closed since this sync
+    /// began (1 − behind/start). Within tolerance of now → 1.0 (green). No data yet → empty.
     private var syncProgress: (fraction: Double, tint: Color) {
         let caughtUp = StrandPalette.recovery100
         let active = StrandPalette.accent
-        guard let health = healthUpTo else { return (0, StrandPalette.statusWarning) }
-        let cal = Calendar.current
-        let yesterday = cal.startOfDay(for: Date()).addingTimeInterval(-86_400)
-        let behind = max(0, cal.dateComponents([.day], from: cal.startOfDay(for: health), to: yesterday).day ?? 0)
-        if behind <= 0 { return (1.0, caughtUp) }              // caught up through yesterday
-        guard let start = syncStartGapDays, start > 0 else {
-            // No sync has started this session — show a small sliver so the ring isn't bare,
-            // representing "not yet started catching up".
+        guard let behind = offloadHoursBehind else { return (0, StrandPalette.statusWarning) }
+        if behind <= Self.caughtUpToleranceHrs { return (1.0, caughtUp) }   // deep data current
+        guard let start = syncStartGapHrs, start > Self.caughtUpToleranceHrs else {
+            // No sync has captured a baseline this session — show a small sliver, not a bare ring.
             return (0.04, live.backfilling ? active : StrandPalette.statusWarning)
         }
-        let closed = Double(start - behind) / Double(start)    // 0…1 of the original gap closed
+        // Of the original backlog (start → tolerance), how much has been closed.
+        let span = start - Self.caughtUpToleranceHrs
+        let closed = span > 0 ? (start - behind) / span : 1.0
         return (min(max(closed, 0.0), 1.0), live.backfilling ? active : StrandPalette.statusWarning)
     }
 
-    /// Snapshot the freshness gap when a sync STARTS, so the ring measures progress from there.
-    /// Called on each freshness refresh + on backfilling edges.
+    /// Snapshot the backlog (hours behind) when a sync STARTS, so the ring measures progress from
+    /// there. Called on each freshness refresh + on backfilling edges.
     private func updateSyncStartGap() {
-        let cal = Calendar.current
-        let yesterday = cal.startOfDay(for: Date()).addingTimeInterval(-86_400)
-        let behind = healthUpTo.map { max(0, cal.dateComponents([.day], from: cal.startOfDay(for: $0), to: yesterday).day ?? 0) }
+        let behind = offloadHoursBehind
         if live.backfilling {
-            // On the rising edge of a sync, capture the starting gap once (the larger of any prior
-            // baseline and the current gap, so a multi-day sync doesn't reset its denominator).
-            if let b = behind, b > 0 { syncStartGapDays = max(syncStartGapDays ?? 0, b) }
-        } else if (behind ?? 0) <= 0 {
+            // Rising edge: capture the largest seen backlog as the denominator (a multi-day sync
+            // shouldn't reset its baseline mid-run).
+            if let b = behind, b > Self.caughtUpToleranceHrs { syncStartGapHrs = max(syncStartGapHrs ?? 0, b) }
+        } else if (behind ?? .infinity) <= Self.caughtUpToleranceHrs {
             // Caught up and idle → clear the baseline so the next sync measures fresh.
-            syncStartGapDays = nil
+            syncStartGapHrs = nil
         }
     }
 
-    /// The one-glance "how far behind" headline. Measures the gap between the newest
-    /// COMPLETE day (yesterday, the last day that could be fully synced) and the newest
-    /// health day actually on device. 0 days behind = caught up. nil health = no data yet.
+    /// The one-glance "how far behind" headline, measured against the OFFLOAD reach (the deep data:
+    /// sleep + sensors), NOT the live HR. Within tolerance → caught up. Otherwise states the backlog
+    /// in hours/days so it's obvious when last night's sleep hasn't come down.
     private var behindHeadline: (text: String, caughtUp: Bool) {
-        guard let health = healthUpTo else {
-            return ("No health data synced yet", false)
+        guard let behind = offloadHoursBehind else {
+            return ("No sleep/sensor data synced yet", false)
         }
-        let cal = Calendar.current
-        // Yesterday is the latest day that can be fully offloaded (today is still in progress).
-        let yesterday = cal.startOfDay(for: Date()).addingTimeInterval(-86_400)
-        let healthDay = cal.startOfDay(for: health)
-        let daysBehind = max(0, cal.dateComponents([.day], from: healthDay, to: yesterday).day ?? 0)
+        if behind <= Self.caughtUpToleranceHrs {
+            if live.backfilling { return ("Syncing… almost current", false) }
+            return ("Sleep & sensors are current", true)
+        }
+        let gap = behindGapText(behind)
         if live.backfilling {
-            return ("Syncing… catching up \(daysBehind == 0 ? "the latest day" : "\(daysBehind) day\(daysBehind == 1 ? "" : "s")")", false)
+            return ("Syncing… \(gap) of sleep/sensor data behind", false)
         }
-        if daysBehind <= 0 {
-            return ("Sync caught up — through yesterday", true)
-        }
-        let last = freshnessText(health, withTime: false)
-        return ("Behind by \(daysBehind) day\(daysBehind == 1 ? "" : "s") · last full day: \(last.components(separatedBy: " · ").first ?? last)", false)
+        let last = freshnessText(healthUpTo, withTime: true)
+        return ("Last night not synced — \(gap) behind · reached \(last.components(separatedBy: " · ").first ?? last)", false)
+    }
+
+    /// Humanize an hours-behind gap: "Nh" under a day, else "Nd".
+    private func behindGapText(_ hours: Double) -> String {
+        if hours < 48 { return "\(Int(hours.rounded()))h" }
+        return "\(Int((hours / 24).rounded()))d"
     }
 
     private func footerRow(icon: String, tint: Color, text: String) -> some View {
@@ -250,11 +259,10 @@ struct SettingsView: View {
         }
     }
 
-    /// Health data is "stale" (highlighted) when its newest day is more than ~36h behind
-    /// now — i.e. last night's sleep hasn't been offloaded + rolled up yet.
+    /// Sleep/sensor data is "stale" (highlighted) when the offload reach trails now by more than the
+    /// caught-up tolerance — i.e. last night's sleep hasn't been offloaded yet.
     private var healthIsStale: Bool {
-        guard let d = healthUpTo else { return true }
-        return Date().timeIntervalSince(d) > 36 * 3600
+        (offloadHoursBehind ?? .infinity) > Self.caughtUpToleranceHrs
     }
 
     /// Formats a freshness date. `withTime`: include clock time (live HR is precise to the
