@@ -72,6 +72,7 @@ struct SleepView: View {
                         metricGrid(resolved)
                         stagesVsTypical(resolved)
                         durationTrend(resolved)
+                        bedtimeTrend()
                     }
                 } else {
                     emptyState
@@ -432,6 +433,107 @@ struct SleepView: View {
                 }
             )
         }
+    }
+
+    // MARK: - 5. Bedtime trend (moving average)
+
+    /// A trend of when you go to bed each night, with a MOVING AVERAGE line so the habit (drift
+    /// earlier/later) is visible through the night-to-night noise. Bedtime is each night's sleep-onset
+    /// (session start) expressed as decimal hours on a continuous evening axis: a 9pm–4am window maps
+    /// to 21.0…28.0 (28.0 = 4am) so a post-midnight bedtime sits ABOVE an 11pm one instead of wrapping
+    /// to 0 and breaking the average.
+    @ViewBuilder
+    private func bedtimeTrend() -> some View {
+        let raw = bedtimeTrendPoints
+        let avgPts = movingAverage(raw, window: 7)
+        let meanHr = raw.isEmpty ? nil : raw.map(\.value).reduce(0,+) / Double(raw.count)
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Bedtime", overline: "Trend", trailing: "7-night moving avg")
+            ChartCard(
+                title: "When you fall asleep",
+                subtitle: "Per night + 7-night average",
+                trailing: meanHr.map { "~\(clockLabel($0)) avg" },
+                height: NoopMetrics.chartHeight,
+                chart: {
+                    if avgPts.count >= 2 {
+                        TrendChart(points: avgPts,
+                                   gradient: StrandPalette.recoveryGradient,
+                                   valueRange: bedtimeRange(raw),
+                                   showsArea: false,
+                                   height: NoopMetrics.chartHeight,
+                                   valueFormat: { clockLabel($0) })
+                    } else {
+                        sparsePlaceholder
+                    }
+                },
+                footer: {
+                    ChartFooter([
+                        ("Avg",      meanHr.map { clockLabel($0) } ?? "—"),
+                        ("Earliest", raw.map(\.value).min().map { clockLabel($0) } ?? "—"),
+                        ("Latest",   raw.map(\.value).max().map { clockLabel($0) } ?? "—"),
+                        ("Nights",   "\(raw.count)"),
+                    ])
+                }
+            )
+        }
+    }
+
+    /// Each night's bedtime (sleep-onset) as a decimal hour on the continuous evening axis described
+    /// above. Trailing 60 nights (bedtime drifts slowly, so a longer window than duration reads better).
+    private var bedtimeTrendPoints: [TrendPoint] {
+        let cal = Calendar.current
+        func onsetHour(_ ts: Int) -> Double {
+            let d = Date(timeIntervalSince1970: TimeInterval(ts))
+            let c = cal.dateComponents([.hour, .minute], from: d)
+            var h = Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60.0
+            if h < 12 { h += 24 }   // small hours belong to the previous evening → 0–12 maps to 24–36
+            return h
+        }
+        // One bedtime per night, keyed by the wake day so the x-axis is a clean nightly series.
+        let nights = (allSessions.isEmpty ? repo.sleeps : allSessions)
+            .sorted { $0.startTs < $1.startTs }
+        var byDay: [String: (date: Date, hour: Double)] = [:]
+        for s in nights {
+            let endDate = Date(timeIntervalSince1970: TimeInterval(s.endTs))
+            let key = SleepView.dayParser.string(from: endDate)
+            // Keep the EARLIEST onset of the night (the true bedtime, not a mid-night re-onset).
+            let hr = onsetHour(s.startTs)
+            if let existing = byDay[key], existing.hour <= hr { continue }
+            byDay[key] = (date: endDate, hour: hr)
+        }
+        let pts = byDay.values.sorted { $0.date < $1.date }.map { TrendPoint(date: $0.date, value: $0.hour) }
+        return Array(pts.suffix(60))
+    }
+
+    /// Centered-trailing moving average over `window` nights (the line the user asked for).
+    private func movingAverage(_ pts: [TrendPoint], window: Int) -> [TrendPoint] {
+        guard pts.count >= 2 else { return pts }
+        let w = Swift.max(1, Swift.min(window, pts.count))
+        var out: [TrendPoint] = []
+        for i in pts.indices {
+            let lo = Swift.max(0, i - w + 1)
+            let slice = pts[lo...i]
+            let mean = slice.map(\.value).reduce(0, +) / Double(slice.count)
+            out.append(TrendPoint(date: pts[i].date, value: mean))
+        }
+        return out
+    }
+
+    /// y-range for the bedtime axis, padded ~30 min each side.
+    private func bedtimeRange(_ pts: [TrendPoint]) -> ClosedRange<Double> {
+        let vals = pts.map(\.value)
+        let lo = (vals.min() ?? 22) - 0.5
+        let hi = (vals.max() ?? 24) + 0.5
+        return lo...Swift.max(hi, lo + 1)
+    }
+
+    /// Format a decimal evening-hour (21.0…36.0) as a 12h clock label, e.g. 23.5 → "11:30 PM".
+    private func clockLabel(_ hour: Double) -> String {
+        let h24 = Int(hour.rounded(.down)) % 24
+        let mins = Int((hour - hour.rounded(.down)) * 60.0)
+        let ampm = h24 < 12 ? "AM" : "PM"
+        var h12 = h24 % 12; if h12 == 0 { h12 = 12 }
+        return String(format: "%d:%02d %@", h12, mins, ampm)
     }
 
     // MARK: - Memoization plumbing
