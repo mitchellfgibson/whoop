@@ -39,7 +39,6 @@ struct TodayView: View {
     @State private var hrPoints: [TrendPoint] = []
 
     // Support sheet (donate + contact) — always reachable from the home toolbar.
-    @State private var showingSupport = false
 
     // THE single grid definition — every tile group reuses it so margins line up.
     private let grid = [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)]
@@ -69,9 +68,10 @@ struct TodayView: View {
         ScreenScaffold(title: "Control Center", subtitle: "\(dateLine)") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 HealthAlertBanner()
+                // Sync progress, front and center — shows a ring + how far behind the offload is,
+                // and DISAPPEARS automatically once sleep/sensor data is caught up. (See TodaySyncBanner.)
+                TodaySyncBanner()
                 if repo.today?.recovery == nil {
-                    // While the strap is mid-offload, say so — empty tiles read as final otherwise (#77).
-                    if live.backfilling { SyncingHistoryNote(chunks: live.syncChunksThisSession) }
                     DataPendingNote(
                         title: "Live now. Your scores are building.",
                         message: "Your live heart rate is working from the strap, and charge, effort and rest build from it over your next few nights of wear, sharpening as it learns your baseline. Want your full history instantly? Import your WHOOP export in Data Sources and it backfills in about a minute."
@@ -82,31 +82,12 @@ struct TodayView: View {
                 readinessSection
                 metricsSection
                 workoutsSection
-                // Honest, dismissible 12-hourly donation ask — a card in the flow, never a modal.
-                DonationNudgeCard()
                 sourcesSection
                 // PATCH (consolidated nav): Live moved to the bottom of Today.
                 LiveView(embedded: true)
             }
         }
         .task(id: repo.refreshSeq) { await loadAll() }
-        .toolbar {
-            ToolbarItem {
-                Button { showingSupport = true } label: {
-                    Image(systemName: "heart.fill")
-                        .foregroundStyle(StrandPalette.metricRose)
-                        .attentionWiggle(period: 4)
-                }
-                .help("Support NOOP — donate or get in touch")
-                .accessibilityLabel("Support NOOP — donate or get in touch")
-            }
-        }
-        .overlay {
-            if showingSupport {
-                SupportModalOverlay(isPresented: $showingSupport)
-            }
-        }
-        .animation(.easeOut(duration: 0.18), value: showingSupport)
     }
 
     // MARK: Readiness — on-device training-readiness synthesis (HRV / resting-HR / load).
@@ -707,6 +688,89 @@ struct TodayView: View {
         f.dateFormat = "HH:mm"
         return f
     }()
+}
+
+// MARK: - Today sync banner (auto-hiding)
+
+/// A compact sync card on the home page: a progress ring + how far behind the offload (sleep/sensor
+/// data) is. It renders NOTHING once the data is caught up — so it appears while a sync is catching
+/// up after a night away from the strap and quietly disappears when current. Same honest source as
+/// the Settings ring: the offload-reach freshness (gravity/skin-temp), not live HR.
+private struct TodaySyncBanner: View {
+    @EnvironmentObject var repo: Repository
+    @EnvironmentObject var live: LiveState
+
+    @State private var healthUpTo: Date?
+    @State private var startGapHrs: Double?
+
+    /// Within this many hours of now the deep data is "current" → the banner hides.
+    private static let toleranceHrs: Double = 12.0
+
+    private var hoursBehind: Double? {
+        healthUpTo.map { max(0, Date().timeIntervalSince($0) / 3600.0) }
+    }
+
+    var body: some View {
+        Group {
+            if let behind = hoursBehind, behind > Self.toleranceHrs {
+                card(behind: behind)
+            }
+            // else: caught up (or no data yet) → render nothing.
+        }
+        .task(id: repo.refreshSeq) { await refresh() }
+        .onChange(of: live.backfilling) { _ in Task { await refresh() } }
+        .onChange(of: live.syncChunksThisSession) { _ in Task { await refresh() } }
+    }
+
+    private func refresh() async {
+        let f = await repo.dataFreshness()
+        healthUpTo = f.health
+        if let b = hoursBehind, b > Self.toleranceHrs, live.backfilling {
+            startGapHrs = max(startGapHrs ?? 0, b)   // capture the starting backlog once
+        } else if (hoursBehind ?? .infinity) <= Self.toleranceHrs {
+            startGapHrs = nil
+        }
+    }
+
+    private var fraction: Double {
+        guard let behind = hoursBehind, behind > Self.toleranceHrs else { return 1.0 }
+        guard let start = startGapHrs, start > Self.toleranceHrs else { return 0.04 }
+        let span = start - Self.toleranceHrs
+        return span > 0 ? min(max((start - behind) / span, 0), 1) : 1
+    }
+
+    private func gapText(_ hours: Double) -> String {
+        hours < 48 ? "\(Int(hours.rounded()))h behind" : "\(Int((hours/24).rounded()))d behind"
+    }
+
+    private func card(behind: Double) -> some View {
+        NoopCard {
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle().stroke(StrandPalette.hairline, lineWidth: 6)
+                    Circle().trim(from: 0, to: fraction)
+                        .stroke(StrandPalette.accent, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .animation(.easeInOut(duration: 0.4), value: fraction)
+                    Text("\(Int((fraction*100).rounded()))%")
+                        .font(.system(size: 14, weight: .semibold)).monospacedDigit()
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                .frame(width: 52, height: 52)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(live.backfilling ? "Syncing your strap…" : "Sleep & sensors catching up")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Text(live.backfilling && live.syncChunksThisSession > 0
+                         ? "\(gapText(behind)) · \(live.syncChunksThisSession) chunks pulled"
+                         : gapText(behind))
+                        .font(.system(size: 12))
+                        .foregroundStyle(StrandPalette.textSecondary)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
 }
 
 // MARK: - Preview

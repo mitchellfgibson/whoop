@@ -22,7 +22,6 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
     case smartAlarm = "Smart alarm"
     case automation = "Automations"
     case settings = "Settings"
-    case support = "Support"
 
     var id: String { rawValue }
 
@@ -50,7 +49,6 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .automation: return "Automations"
         case .smartAlarm: return "Smart alarm"
         case .settings: return "Settings"
-        case .support: return "Support"
         }
     }
 
@@ -76,7 +74,6 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .smartAlarm: return "alarm.fill"
         case .automation: return "wand.and.stars"
         case .settings: return "gearshape.fill"
-        case .support: return "heart.fill"
         }
     }
 }
@@ -152,7 +149,6 @@ struct RootView: View {
         case .smartAlarm: SmartAlarmView()
         case .automation: AutomationsView()
         case .settings: SettingsView()
-        case .support: SupportView()
         }
     }
 }

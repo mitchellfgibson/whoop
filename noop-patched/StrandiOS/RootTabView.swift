@@ -56,7 +56,6 @@ struct RootTabView: View {
                     link("Automations", "wand.and.stars") { AutomationsView() }
                     link("Smart alarm", "alarm.fill") { SmartAlarmView() }
                     link("Settings", "gearshape.fill") { SettingsView() }
-                    link("Support", "hands.clap.fill") { SupportView() }
                 }
             }
             .listStyle(.insetGrouped)
