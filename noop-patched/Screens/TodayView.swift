@@ -90,25 +90,23 @@ struct TodayView: View {
     /// shows only the live data (June 2026 →). Flipping it re-runs the whole refresh, so every screen
     /// (dashboard, trends, sleep, Explore) follows the choice. The setting persists across launches.
     private var dataScopeToggle: some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 0)
+        HStack(spacing: 2) {
             ForEach([Repository.DataScope.allHistory, .whoop5Only], id: \.self) { scope in
                 let on = repo.dataScope == scope
                 Button {
                     if repo.dataScope != scope { repo.dataScope = scope }
                 } label: {
-                    Text(scope == .allHistory ? "All" : "WHOOP 5")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(on ? StrandPalette.surfaceBase : StrandPalette.textSecondary)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
+                    Text(scope == .allHistory ? "All" : "New")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(on ? StrandPalette.surfaceBase : StrandPalette.textTertiary)
+                        .padding(.horizontal, 8).padding(.vertical, 2.5)
                         .background(on ? StrandPalette.accent : Color.clear, in: Capsule())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(3)
+        .padding(1.5)
         .background(StrandPalette.surfaceRaised, in: Capsule())
-        .overlay(Capsule().stroke(StrandPalette.hairline, lineWidth: 1))
         .frame(maxWidth: .infinity, alignment: .trailing)
     }
 

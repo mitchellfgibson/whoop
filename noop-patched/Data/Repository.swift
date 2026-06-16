@@ -282,7 +282,10 @@ final class Repository: ObservableObject {
         guard let store = await ensureStore() else { return [] }
         let now = Int(Date().timeIntervalSince1970)
         let lo = now - days * 86_400, hi = now + 86_400
-        let imported = (try? await store.sleepSessions(deviceId: deviceId, from: lo, to: hi, limit: 4000)) ?? []
+        // Honor the data scope: in WHOOP-5-only mode the imported (old) sleep is dropped here too —
+        // SleepView reads THIS accessor (not repo.sleeps) for the hero/hypnogram/bedtime, so without
+        // this gate the old March-2025 nights still showed in 5-only mode. (#scope)
+        let imported = whoop5Only ? [] : ((try? await store.sleepSessions(deviceId: deviceId, from: lo, to: hi, limit: 4000)) ?? [])
         let computed = (try? await store.sleepSessions(deviceId: computedDeviceId, from: lo, to: hi, limit: 4000)) ?? []
         let cal = Calendar.current
         func endDay(_ s: CachedSleepSession) -> Date {
@@ -336,7 +339,7 @@ final class Repository: ObservableObject {
         let now = Date()
         let from = Self.dayString(now.addingTimeInterval(-Double(days) * 86_400))
         let to = Self.dayString(now.addingTimeInterval(86_400))
-        let imported = (try? await store.journalEntries(deviceId: deviceId, from: from, to: to)) ?? []
+        let imported = whoop5Only ? [] : ((try? await store.journalEntries(deviceId: deviceId, from: from, to: to)) ?? [])
         let native = (try? await store.journalEntries(deviceId: Self.journalDeviceId,
                                                       from: from, to: to)) ?? []
         return Self.mergeJournal(imported: imported, native: native)
@@ -397,7 +400,8 @@ final class Repository: ObservableObject {
         guard let store = await ensureStore() else { return [] }
         let now = Int(Date().timeIntervalSince1970)
         let lo = now - days * 86_400, hi = now + 86_400
-        var rows = (try? await store.workouts(deviceId: deviceId, from: lo, to: hi, limit: 5000)) ?? []
+        // WHOOP-5-only mode drops the imported WHOOP workouts; live (computed) + Apple Health stay.
+        var rows = whoop5Only ? [] : ((try? await store.workouts(deviceId: deviceId, from: lo, to: hi, limit: 5000)) ?? [])
         rows += (try? await store.workouts(deviceId: "apple-health", from: lo, to: hi, limit: 5000)) ?? []
         rows += (try? await store.workouts(deviceId: computedDeviceId, from: lo, to: hi, limit: 5000)) ?? []
         let spans = WorkoutSource.parseDismissedSpans(dismissedDetectedSpans)
