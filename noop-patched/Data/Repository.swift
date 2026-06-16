@@ -36,7 +36,30 @@ final class Repository: ObservableObject {
     /// date string within a day and would freeze e.g. the Today HR trend until the date rolls over.
     @Published private(set) var refreshSeq = 0
 
-    init(deviceId: String) { self.deviceId = deviceId }
+    /// Which data the whole app shows. `.allHistory` includes the imported WHOOP-account export
+    /// (March 2025 and earlier) merged with the live strap; `.whoop5Only` shows ONLY the live WHOOP 5
+    /// data (June 2026 onward) — the imported source is dropped everywhere (days, sleeps, trends,
+    /// Explore series). Persisted so the choice sticks across launches; changing it re-runs refresh().
+    enum DataScope: String { case allHistory, whoop5Only }
+    private static let scopeKey = "noop.dataScope"
+    @Published var dataScope: DataScope = .allHistory {
+        didSet {
+            guard dataScope != oldValue else { return }
+            UserDefaults.standard.set(dataScope.rawValue, forKey: Repository.scopeKey)
+            Task { await refresh() }
+        }
+    }
+    /// True when the live-only mode is active — the merge + series() drop the imported source.
+    private var whoop5Only: Bool { dataScope == .whoop5Only }
+
+    init(deviceId: String) {
+        self.deviceId = deviceId
+        // Restore the persisted scope without triggering didSet's refresh (no store yet at init).
+        if let raw = UserDefaults.standard.string(forKey: Repository.scopeKey),
+           let s = DataScope(rawValue: raw) {
+            _dataScope = Published(initialValue: s)
+        }
+    }
 
     /// Today's row, by the device's LOGICAL local day — NOT just the newest stored row, which after a
     /// historical import was months-old data shown as today's hero (issue #23). The logical day rolls at
@@ -117,17 +140,19 @@ final class Repository: ObservableObject {
         let nowTs = Int(now.timeIntervalSince1970)
         let lo = nowTs - nDays * 86_400, hi = nowTs + 86_400
 
-        let imported = (try? await store.dailyMetrics(deviceId: deviceId, from: fromDay, to: toDay)) ?? []
+        // In WHOOP-5-only mode the imported (March-2025-and-earlier) source is dropped entirely, so
+        // only the live strap's computed data feeds the dashboard, trends and Explore.
+        let imported = whoop5Only ? [] : ((try? await store.dailyMetrics(deviceId: deviceId, from: fromDay, to: toDay)) ?? [])
         let computed = (try? await store.dailyMetrics(deviceId: computedDeviceId, from: fromDay, to: toDay)) ?? []
-        let impSleep = (try? await store.sleepSessions(deviceId: deviceId, from: lo, to: hi, limit: 4000)) ?? []
+        let impSleep = whoop5Only ? [] : ((try? await store.sleepSessions(deviceId: deviceId, from: lo, to: hi, limit: 4000)) ?? [])
         let compSleep = (try? await store.sleepSessions(deviceId: computedDeviceId, from: lo, to: hi, limit: 4000)) ?? []
 
         // Export-verbatim sleep figures (long-format metricSeries rows from WhoopImporter).
-        // SleepView prefers these per day over its APPROXIMATE recomputations.
-        let perf = (try? await store.metricSeries(deviceId: deviceId, key: "sleep_performance", from: fromDay, to: toDay)) ?? []
-        let cons = (try? await store.metricSeries(deviceId: deviceId, key: "sleep_consistency", from: fromDay, to: toDay)) ?? []
-        let need = (try? await store.metricSeries(deviceId: deviceId, key: "sleep_need_min", from: fromDay, to: toDay)) ?? []
-        let debt = (try? await store.metricSeries(deviceId: deviceId, key: "sleep_debt_min", from: fromDay, to: toDay)) ?? []
+        // SleepView prefers these per day over its APPROXIMATE recomputations. Skipped in 5-only mode.
+        let perf = whoop5Only ? [] : ((try? await store.metricSeries(deviceId: deviceId, key: "sleep_performance", from: fromDay, to: toDay)) ?? [])
+        let cons = whoop5Only ? [] : ((try? await store.metricSeries(deviceId: deviceId, key: "sleep_consistency", from: fromDay, to: toDay)) ?? [])
+        let need = whoop5Only ? [] : ((try? await store.metricSeries(deviceId: deviceId, key: "sleep_need_min", from: fromDay, to: toDay)) ?? [])
+        let debt = whoop5Only ? [] : ((try? await store.metricSeries(deviceId: deviceId, key: "sleep_debt_min", from: fromDay, to: toDay)) ?? [])
         var fig: [String: ImportedSleepFigures] = [:]
         for p in perf { fig[p.day, default: ImportedSleepFigures()].performancePct = p.value }
         for p in cons { fig[p.day, default: ImportedSleepFigures()].consistencyPct = p.value }
@@ -277,7 +302,10 @@ final class Repository: ObservableObject {
         let now = Date()
         let from = Self.dayString(now.addingTimeInterval(-Double(days) * 86_400))
         let to = Self.dayString(now.addingTimeInterval(86_400))
-        let imported = (try? await store.metricSeries(deviceId: source, key: key, from: from, to: to)) ?? []
+        // In WHOOP-5-only mode the imported (old) series is dropped for the WHOOP source, so Explore
+        // and trends show only live strap data; other sources (apple-health) are never filtered.
+        let dropImported = whoop5Only && source == deviceId
+        let imported = dropImported ? [] : ((try? await store.metricSeries(deviceId: source, key: key, from: from, to: to)) ?? [])
         // PATCH: merge the live computed series (recent days, from the strap) over the
         // imported series (old history) — computed WINS per day, so Explore/trends show
         // fresh strap values for recent days while keeping imported history further back.
