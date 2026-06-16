@@ -9,14 +9,34 @@ public struct WidgetSnapshot: Codable, Equatable {
     public var batteryPct: Int?
     public var bonded: Bool
     public var updated: Date
+    /// Sync progress for the lock-screen glance — so you can watch the offload catch up without
+    /// opening the app. `syncHoursBehind` = how far the deep data (sleep/sensors) trails now;
+    /// `syncing` = a backfill is actively running. Optional/defaulted so older payloads still decode.
+    public var syncHoursBehind: Double?
+    public var syncing: Bool
 
-    public init(recovery: Int?, bpm: Int?, batteryPct: Int?, bonded: Bool, updated: Date) {
+    public init(recovery: Int?, bpm: Int?, batteryPct: Int?, bonded: Bool, updated: Date,
+                syncHoursBehind: Double? = nil, syncing: Bool = false) {
         self.recovery = recovery
         self.bpm = bpm
         self.batteryPct = batteryPct
         self.bonded = bonded
         self.updated = updated
+        self.syncHoursBehind = syncHoursBehind
+        self.syncing = syncing
     }
+
+    /// Sync fraction (0…1) for a ring, derived from the backlog. Caught up within 12h → 1.0.
+    /// Without a known starting backlog we can't show true %, so this maps the current gap onto a
+    /// soft 0–48h scale purely for the ring fill — the textual "Nh behind" is the honest number.
+    public var syncFraction: Double {
+        guard let h = syncHoursBehind else { return 0 }
+        if h <= 12 { return 1.0 }
+        return max(0.04, min(1.0, 1.0 - (h - 12) / 48.0))
+    }
+
+    /// "Synced" when the deep data is within ~12h of now.
+    public var syncCaughtUp: Bool { (syncHoursBehind ?? .infinity) <= 12 }
 
     /// App Group suite the app and widget both use. Must match the `com.apple.security.application-groups`
     /// entitlement on both targets. If the entitlement is missing on either side, `UserDefaults(suiteName:)`
@@ -34,7 +54,8 @@ public struct WidgetSnapshot: Codable, Equatable {
     }
 
     public static var placeholder: WidgetSnapshot {
-        WidgetSnapshot(recovery: 72, bpm: 58, batteryPct: 84, bonded: true, updated: Date())
+        WidgetSnapshot(recovery: 72, bpm: 58, batteryPct: 84, bonded: true, updated: Date(),
+                       syncHoursBehind: 6, syncing: false)
     }
 
     /// Read the last-published snapshot from the shared suite, if any.
