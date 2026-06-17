@@ -8,6 +8,8 @@ enum BackfillTrigger {
     case foreground  // the app became active (scenePhase .active)
     case manual      // the user tapped "Sync now"
     case strap       // an incoming strap EVENT packet (WHOOP's HighFreqSyncPrompt analog)
+    case heartbeat   // an incoming live-HR notify — drives the offload even when the DispatchSource
+                     // timer is frozen (suspended-app background sync). Same adaptive floor as periodic.
 }
 
 /// Pure rate-limiter for historical-offload kicks. No BLE/store deps.
@@ -29,9 +31,9 @@ enum BackfillPolicy {
         guard let last = lastBackfillAt else { return true }
         let elapsed = now - last
         switch trigger {
-        case .manual:                        return true
-        case .connect, .foreground, .strap:  return elapsed >= eventFloorSeconds
-        case .periodic:                      return elapsed >= (caughtUp ? periodicFloorSeconds : catchUpFloorSeconds)
+        case .manual:                          return true
+        case .connect, .foreground, .strap:    return elapsed >= eventFloorSeconds
+        case .periodic, .heartbeat:            return elapsed >= (caughtUp ? periodicFloorSeconds : catchUpFloorSeconds)
         }
     }
 }

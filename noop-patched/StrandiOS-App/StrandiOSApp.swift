@@ -29,6 +29,9 @@ struct StrandiOSApp: App {
             appleDeviceId: model.appleDeviceId,
             noopDeviceId: model.deviceId
         ))
+        // Register the periodic background-offload task BEFORE launch finishes (BGTaskScheduler
+        // requirement). The first window is scheduled on the first background transition below.
+        BackgroundSync.register(model: model)
     }
 
     var body: some Scene {
@@ -75,6 +78,8 @@ struct StrandiOSApp: App {
                 // into Apple Health. Gated inside writeIfEnabled on the opt-in default (OFF) — a
                 // no-op until the user turns on Shortcuts Export.
                 Task { await ShortcutHealthExport.writeIfEnabled(repo: model.repo) }
+                // Schedule the next background-offload window so the strap keeps syncing in pocket.
+                BackgroundSync.schedule()
             }
         }
     }

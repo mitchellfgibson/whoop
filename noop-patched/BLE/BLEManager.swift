@@ -1623,6 +1623,12 @@ extension BLEManager: CBPeripheralDelegate {
                 state.bonded = true
                 log("WHOOP 5/MG: live HR streaming — marking the link established (experimental).")
             }
+            // BACKGROUND-SYNC: the periodic offload is a DispatchSource timer, which FREEZES while the
+            // app is suspended. The live-HR notify keeps arriving (and wakes a suspended app via the
+            // restore identifier), so piggyback an offload trigger on it. The BackfillPolicy floor
+            // (5s behind / 15min caught up) + the !backfilling guard rate-limit it, so this is a cheap
+            // heartbeat that keeps the offload draining whenever data flows — foreground OR background.
+            requestSync(.heartbeat)
         case BLEManager.batteryChar:
             // 0x2A19 = percent — 5/MG ONLY. The WHOOP 4.0's 0x2A19 is a stub constant 100 (real value =
             // GET_BATTERY_LEVEL response, u16/10) and it's subscribed, so an unsolicited stub
