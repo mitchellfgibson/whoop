@@ -1278,10 +1278,24 @@ extension BLEManager: CBCentralManagerDelegate {
         puffinRecorder.flush()   // persist any buffered puffin capture frames before reconnect
         Task { @MainActor in await collector?.flushStandardHR() }   // persist any buffered 0x2A37 HR
         if !intentionalDisconnect {
-            log("Disconnected\(error.map { " — \($0.localizedDescription)" } ?? ""); rescanning in 3s")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                guard let self, !self.intentionalDisconnect else { return }
-                self.connect()
+            // AGGRESSIVE BACKGROUND RECONNECT: issue a DIRECT pending connect on the retained
+            // peripheral immediately. Unlike scanForPeripherals (heavily throttled in the background)
+            // and the old 3s asyncAfter (a DispatchSource delay that freezes while suspended), a
+            // `central.connect(peripheral)` is a DURABLE request CoreBluetooth honors in the
+            // background — iOS WAKES the app the moment the strap is connectable again, which both
+            // restores the link and (via the live-HR heartbeat) re-kicks the offload. This is the key
+            // to frequent in-pocket background sync. Fall back to the scan path only if we somehow
+            // have no peripheral handle.
+            if let p = peripheral ?? restoredPeripheral {
+                log("Disconnected\(error.map { " — \($0.localizedDescription)" } ?? ""); direct background reconnect")
+                p.delegate = self
+                central.connect(p, options: nil)
+            } else {
+                log("Disconnected\(error.map { " — \($0.localizedDescription)" } ?? ""); rescanning in 3s")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                    guard let self, !self.intentionalDisconnect else { return }
+                    self.connect()
+                }
             }
         } else {
             log("Disconnected (intentional)")
