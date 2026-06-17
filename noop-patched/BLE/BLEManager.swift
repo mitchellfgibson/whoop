@@ -156,9 +156,14 @@ public final class BLEManager: NSObject, ObservableObject {
     /// high-freq-sync), so each periodic tick just routes through requestSync(.periodic) → beginBackfill
     /// (SEND_HISTORICAL_DATA + watchdog), subject to the BackfillPolicy floor.
     private var backfillTimer: DispatchSourceTimer?
-    // The timer fires this often, but BackfillPolicy.periodicFloorSeconds is the real floor (a recent
-    // event-triggered sync defers the next periodic tick). 900s = 15 min, matching WHOOP.
-    static let backfillIntervalSeconds = 900
+    // The timer fires this often, but BackfillPolicy is the real floor. The timer ticks at the SHORT
+    // interval; BackfillPolicy decides per-tick whether to actually run (15-min floor when caught up,
+    // catch-up floor when a backlog is draining). Ticking fast is cheap — it just re-checks the floor.
+    static let backfillIntervalSeconds = 10
+    /// True once an offload reached HISTORY_COMPLETE (strap had nothing more); false while a backlog is
+    /// still draining (a session banked data but ended via timeout/disconnect with more pending). Drives
+    /// the adaptive cadence — hammer while behind, relax once caught up. Optimistic default (true).
+    private var syncCaughtUp = true
     /// Keep-alive: re-arm realtime, poll battery, and bounce a stalled link so streaming
     /// never silently dies. Started on bond, cancelled on disconnect.
     private var keepAliveTimer: DispatchSourceTimer?
@@ -200,7 +205,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// True while the drain task is running (prevents a second drain task from launching).
     private var backfillDraining = false
     /// Keep each main-actor drain slice small enough that SwiftUI can process input/paint between slices.
-    private static let backfillDrainBatchSize = 12
+    // 48 (was 12): drain more frames per slice so a fast incoming stream commits quicker and the
+    // queue doesn't back up; still small enough to yield to the UI between slices.
+    private static let backfillDrainBatchSize = 48
 
     /// Records WHOOP 5/MG puffin frames to a JSON file for protocol mapping. Passive (read-only on the
     /// strap) and gated by the Settings → Experimental "Record puffin frames" toggle; a no-op for
@@ -709,7 +716,9 @@ public final class BLEManager: NSObject, ObservableObject {
     /// off). Timeout is generous (60 s, not 20 s): the unstoppable ~2/s type-43 raw flood eats BLE
     /// airtime, so genuine offload frames can arrive in bursts with multi-second lulls between chunks
     /// — a short watchdog cut sessions short mid-drain. Longer = more records drained per session.
-    static let backfillIdleTimeoutSeconds = 60
+    // 120s (was 60): a marginal link can pause >60s between chunks on a big backlog; a longer idle
+    // grace keeps a slow-but-alive session going instead of aborting it (each chunk re-arms this).
+    static let backfillIdleTimeoutSeconds = 120
     private func armBackfillTimeout() {
         backfillTimeout?.cancel()
         let item = DispatchWorkItem { [weak self] in
@@ -762,8 +771,13 @@ public final class BLEManager: NSObject, ObservableObject {
         endSyncBackgroundTask()   // release the assertion now the offload is done/stopped
         backfillTimeout?.cancel()
         backfillTimeout = nil
+        // Adaptive cadence: a clean HISTORY_COMPLETE means the strap had nothing more → caught up
+        // (relax to 15-min). ANY other end (idle timeout) that still banked chunks means more is
+        // pending → stay in fast catch-up so the next tick re-kicks within seconds, not 15 min.
+        let bankedData = (backfiller?.sessionRowsPersisted ?? 0) > 0
+        syncCaughtUp = (reason == "HISTORY_COMPLETE") || !bankedData
         backfillFrameQueue.removeAll()
-        log("Backfill: session ended — reason=\(reason)")
+        log("Backfill: session ended — reason=\(reason), caughtUp=\(syncCaughtUp)")
         // Success-side summary (#150 forensics): we logged failures (decoded-to-0) but never successes,
         // so a strap log couldn't tell a banking strap from a broken one. Emit the per-session persistence
         // tally whenever anything actually landed — the win-rate signal a log previously lacked.
@@ -989,8 +1003,10 @@ public final class BLEManager: NSObject, ObservableObject {
             connected: state.connected, bonded: state.bonded, backfilling: backfilling) else { return }
         let now = Date().timeIntervalSince1970
         let last = UserDefaults.standard.object(forKey: BLEManager.backfillLastAtKey) as? Double
-        guard BackfillPolicy.shouldRun(trigger: trigger, now: now, lastBackfillAt: last) else {
-            log("Backfill: \(trigger) skipped (rate-limited; last \(last.map { Int(now - $0) } ?? -1)s ago)")
+        // Adaptive cadence: while a backlog is draining (last session banked data but didn't reach
+        // HISTORY_COMPLETE), re-kick on the short catch-up floor; once caught up, fall back to 15 min.
+        guard BackfillPolicy.shouldRun(trigger: trigger, now: now, lastBackfillAt: last, caughtUp: syncCaughtUp) else {
+            log("Backfill: \(trigger) skipped (rate-limited; last \(last.map { Int(now - $0) } ?? -1)s ago, caughtUp=\(syncCaughtUp))")
             return
         }
         if beginBackfill() {
