@@ -173,6 +173,14 @@ public final class BLEManager: NSObject, ObservableObject {
     private var lastDataAt = Date()
     /// True while the Live screen wants the (heavy) realtime stream; keep-alive re-arms it.
     private var wantsRealtime = false
+    /// BACKGROUND RESIDENCY: keep the realtime HR stream armed whenever connected — NOT just while the
+    /// Live screen is open. iOS keeps a `bluetooth-central` app resident in the background only while a
+    /// subscribed characteristic keeps delivering notifications. If the strap goes quiet (realtime
+    /// disarmed because Live isn't open / the app is backgrounded), iOS suspends us within seconds, the
+    /// link drops, and the offload stops — which is why screen-off sync failed. Keeping realtime armed
+    /// keeps notifications flowing → the app stays alive → the offload keeps running with the screen
+    /// off. Default ON; this is the single most important lever for in-pocket sync.
+    var keepRealtimeForSync = true
     /// #80 marginal-radio fallback: tracks consecutive arm-then-quick-timeout cycles. When it trips,
     /// `standardHRFallback` goes true and the next connect skips arming R10/R11 (relies on 0x2A37).
     private var marginalRadio = MarginalRadioDetector()
@@ -950,7 +958,15 @@ public final class BLEManager: NSObject, ObservableObject {
         realtimeArmedAt = Date()       // start the arm→drop stopwatch for the marginal-radio detector
     }
     /// Stop the Live-tab realtime streams. The lightweight 0x2A37 HR keeps recording if firmware emits it.
+    /// When `keepRealtimeForSync` is on (the default), this is a NO-OP — leaving Live open must NOT
+    /// disarm the stream, because the flowing notifications are what keep the app resident in the
+    /// background so the historical offload can run with the screen off. Only an explicit pref-off
+    /// (battery saver) actually stops the stream.
     public func stopRealtime() {
+        if keepRealtimeForSync {
+            log("Realtime kept armed for background sync (stopRealtime ignored).")
+            return
+        }
         wantsRealtime = false
         send(.toggleRealtimeHR, payload: [0x00])
         send(.sendR10R11Realtime, payload: [0x00])
@@ -1543,11 +1559,13 @@ extension BLEManager: CBPeripheralDelegate {
             }
             enableLiveNotifications(reason: "post-bond 5/MG")   // standard HR/battery that failed pre-bond
             // Arm realtime HR with puffin framing — the verified step that makes a bonded 5/MG strap start
-            // streaming (issue #17). Once per connection; keep-alive skips 5/MG, so this is the trigger.
-            // (Opening Live later also arms it via startRealtime(), now that send() routes the 5/MG toggle.)
-            if wantsRealtime && !whoop5RealtimeArmed {
+            // streaming (issue #17). Now armed whenever `keepRealtimeForSync` is on (default), NOT only
+            // when Live is open — keeping notifications flowing keeps iOS from suspending us in the
+            // background so the offload survives a screen-off / pocket session.
+            if (wantsRealtime || keepRealtimeForSync), !whoop5RealtimeArmed {
                 whoop5RealtimeArmed = true
-                log("WHOOP 5/MG: arming realtime HR (puffin TOGGLE_REALTIME_HR)")
+                if keepRealtimeForSync { wantsRealtime = true }   // make the keep-alive re-arm it too
+                log("WHOOP 5/MG: arming realtime HR (puffin TOGGLE_REALTIME_HR) — kept on for background sync")
                 send(.toggleRealtimeHR, payload: [0x01])
             }
             startKeepAlive()                                    // re-subscribe + liveness watchdog
