@@ -69,6 +69,10 @@ struct StrandiOSApp: App {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 model.drainPendingIntents()
+                // Foreground force-sync: when the user opens the app, make sure the strap link is up
+                // and a sync is kicked. If the connection lapsed (or the handshake never completed), a
+                // reconnect re-runs the handshake; if it's up, requestSync(.foreground) kicks the offload.
+                model.ble.foregroundSyncKick()
                 Task {
                     await health.sync()
                     WidgetSnapshot.publish(from: model)

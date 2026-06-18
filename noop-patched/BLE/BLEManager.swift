@@ -619,6 +619,50 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Start a historical-offload session: tell the store machine to begin, flip the routing
     /// flag, kick the strap with sendHistoricalData, and arm the idle timeout.
     @discardableResult
+    /// Run the 5/MG connect-handshake completion ONCE per connection: mark the link established, clock
+    /// the strap, and kick the first offload. Called from BOTH the CLIENT_HELLO ack path AND the
+    /// first-puffin-notify-frame path (see didUpdateValueFor) — because the CLIENT_HELLO `.withResponse`
+    /// ack is FLAKY on a marginally-bonded 5/MG (it can error or never arrive even when the encrypted
+    /// link is actually up), and when it didn't fire the whole offload was gated off — the app "didn't
+    /// sync when opened." Receiving any puffin notify frame PROVES the link is encrypted (the strap
+    /// rejects those subscriptions otherwise), so it's a reliable second trigger. Idempotent via
+    /// `whoop5SessionStarted`.
+    /// Called when the app comes to the foreground: ensure the strap is connected and a sync is kicked.
+    /// - Not connected → reconnect (which re-runs the handshake and offload).
+    /// - Connected but the session never started (flaky handshake) → re-arm notifications so a puffin
+    ///   frame can trigger startWhoop5Session, and fire a foreground sync trigger.
+    /// This is the safety net for "I opened the app and it didn't sync."
+    public func foregroundSyncKick() {
+        intentionalDisconnect = false
+        if !state.connected {
+            log("Foreground: not connected — reconnecting to kick sync.")
+            connect()
+            return
+        }
+        // Connected: if the handshake never completed, nudge it; then request a sync.
+        if selectedModel.deviceFamily == .whoop5, let p = peripheral {
+            for c in whoop5NotifyCharacteristics where !c.isNotifying { requestNotify(c, on: p, reason: "foreground") }
+        }
+        requestSync(.foreground)
+    }
+
+    private func startWhoop5Session() {
+        guard !whoop5SessionStarted else { return }
+        whoop5SessionStarted = true
+        if !didBond { didBond = true; state.bonded = true; state.encryptedBond = true; state.pairingHint = nil }
+        connectHandshakeDone = true     // unblocks beginBackfill()'s guard
+        log("WHOOP 5/MG: connect handshake done — backfill unblocked")
+        // Clock the strap BEFORE history: an un-clocked WHOOP 5 discards sensor data and history offloads
+        // "succeed" with metadata only. GET_CLOCK's reply rides the puffin notify chars. (#78 fork)
+        send(.setClock, payload: BLEManager.setClockPayload())
+        send(.getClock, payload: [])
+        log("WHOOP 5/MG: clock synced (set/get) — strap can persist history now")
+        log("WHOOP 5/MG: scheduling first historical offload (connect)")
+        // Deferred ~1.5s so the puffin notify subscriptions settle before SEND_HISTORICAL_DATA.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.requestSync(.connect) }
+        startBackfillTimer()            // re-offload the type-47 store every backfillIntervalSeconds
+    }
+
     private func beginBackfill() -> Bool {
         // Never offload before the connect handshake has run: a racing foreground/restore trigger
         // firing SEND_HISTORICAL ahead of hello/SET_CLOCK was part of the storm that stopped serving.
@@ -1513,26 +1557,7 @@ extension BLEManager: CBPeripheralDelegate {
             // once or it would re-issue SEND_HISTORICAL_DATA mid-stream and storm the strap. The notify
             // re-subscribe + realtime-arm above are idempotent and intentionally run on every re-entry;
             // only this block is gated. `whoop5SessionStarted` resets on disconnect.
-            if !whoop5SessionStarted {
-                whoop5SessionStarted = true
-                connectHandshakeDone = true     // unblocks beginBackfill()'s guard
-                log("WHOOP 5/MG: connect handshake done — backfill unblocked")
-                // Clock the strap BEFORE history: an un-clocked WHOOP 5 discards sensor data ("RTC
-                // timestamp … is invalid; not saving data to flash") and history offloads "succeed"
-                // with metadata only. Same 8-byte payload as the WHOOP4 handshake, puffin-framed;
-                // GET_CLOCK's reply rides the puffin notify chars and never touches the WHOOP4
-                // clockRef correlation path. The 1.5s deferral below keeps clock-before-history.
-                // Hardware-validated ordering (#78 fork).
-                send(.setClock, payload: BLEManager.setClockPayload())
-                send(.getClock, payload: [])
-                log("WHOOP 5/MG: clock synced (set/get) — strap can persist history now")
-                log("WHOOP 5/MG: scheduling first historical offload (connect)")
-                // Deferred ~1.5s so the puffin notify subscriptions settle before SEND_HISTORICAL_DATA,
-                // mirroring the WHOOP4 kick. requestSync → beginBackfill is itself gated on
-                // connectHandshakeDone, so a racing foreground/restore trigger can't fire it early.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.requestSync(.connect) }
-                startBackfillTimer()            // re-offload the type-47 store every backfillIntervalSeconds
-            }
+            startWhoop5Session()
             return
         }
 
@@ -1702,6 +1727,16 @@ extension BLEManager: CBPeripheralDelegate {
             // Collector runs an identity ref for 5/MG via configureCollectorFamily, since live puffin
             // timestamps are already real-unix seconds.) Live HR/battery still also come from the
             // standard 0x2A37 / 0x2A19 profiles handled above.
+            // RELIABLE SYNC TRIGGER: receiving ANY puffin notify frame proves the encrypted link is up
+            // (the strap rejects these subscriptions on an unauthenticated link). So if the flaky
+            // CLIENT_HELLO ack never unblocked the offload, this does — making sync actually start when
+            // the app is open. Idempotent (whoop5SessionStarted guards it).
+            if selectedModel.deviceFamily == .whoop5,
+               BLEManager.whoop5NotifyChars.contains(characteristic.uuid),
+               !whoop5SessionStarted {
+                log("WHOOP 5/MG: puffin notify data arrived — link is live; starting session (CLIENT_HELLO ack path bypassed).")
+                startWhoop5Session()
+            }
             if BLEManager.whoop5NotifyChars.contains(characteristic.uuid) {
                 for frame in reassembler.feed(bytes) {
                     if backfilling, BLEManager.isOffloadFrame(frame, family: .whoop5) {
