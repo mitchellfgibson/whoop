@@ -135,6 +135,10 @@ path = "src/bin/goose-property-test-suite.rs"
 name = "goose-perf-budget"
 path = "src/bin/goose-perf-budget.rs"
 
+[[bin]]
+name = "goose-sleep-from-noop"
+path = "src/bin/goose-sleep-from-noop.rs"
+
 [dependencies]
 crc32fast = "1.4"
 hex = "0.4"

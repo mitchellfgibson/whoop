@@ -1951,6 +1951,10 @@ fn handle_bridge_request_inner(request: BridgeRequest) -> BridgeResponse {
 
     match request.method.as_str() {
         "core.version" => bridge_ok(&request.request_id, core_version_payload()),
+        "healthspan.summary" => request_args::<crate::healthspan::HealthspanInput>(&request)
+            .and_then(healthspan_summary_bridge)
+            .map(|value| bridge_ok(&request.request_id, value))
+            .unwrap_or_else(|error| bridge_error(&request.request_id, "method_error", error)),
         "openwhoop.reference_report" => {
             bridge_ok(&request.request_id, openwhoop_reference_report_payload())
         }
@@ -2678,6 +2682,7 @@ fn body_summary_kind(summary: Option<&DataPacketBodySummary>) -> &'static str {
         }
         Some(DataPacketBodySummary::RawMotionK10 { .. }) => "raw_motion_k10",
         Some(DataPacketBodySummary::RawMotionK21 { .. }) => "raw_motion_k21",
+        Some(DataPacketBodySummary::HistoryPpgK20 { .. }) => "history_ppg_v20",
         None => "none",
     }
 }
@@ -7552,6 +7557,17 @@ where
 {
     serde_json::from_value(request.args.clone())
         .map_err(|error| GooseError::message(format!("invalid args: {error}")))
+}
+
+/// Compute a WHOOP-Age-style Healthspan summary from caller-supplied metric
+/// windows. The model in `crate::healthspan` is pure, so this handler just runs
+/// it and serializes the tagged result (`Ready` summary or `Warming` status).
+fn healthspan_summary_bridge(
+    input: crate::healthspan::HealthspanInput,
+) -> GooseResult<serde_json::Value> {
+    let result = crate::healthspan::compute(&input);
+    serde_json::to_value(result)
+        .map_err(|error| GooseError::message(format!("cannot serialize healthspan summary: {error}")))
 }
 
 fn parse_device_type(value: &str) -> GooseResult<DeviceType> {

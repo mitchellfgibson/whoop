@@ -2390,9 +2390,65 @@ fn export_sensor_samples(
                     )?;
                 }
             }
+            DataPacketBodySummary::HistoryPpgK20 { samples, .. } => {
+                push_u32_sensor_series(
+                    &mut rows,
+                    &context,
+                    "history_ppg_v20",
+                    &samples,
+                );
+            }
         }
     }
     Ok(rows)
+}
+
+/// Emit one row per decoded v20 PPG sample. Unlike the i16 series helpers the PPG
+/// samples are stored in the summary (the two bursts are non-contiguous in the
+/// payload), so we read straight from `series.samples`.
+fn push_u32_sensor_series(
+    rows: &mut Vec<ExportSensorSampleRow>,
+    context: &SensorSampleContext<'_>,
+    source_signal: &str,
+    series: &crate::protocol::U32SeriesSummary,
+) {
+    for (sample_index, value) in series.samples.iter().copied().enumerate() {
+        let mut quality_flags = Vec::new();
+        let sample_time = normalized_sensor_sample_time(
+            context.row,
+            context.timestamp_seconds,
+            context.timestamp_subseconds,
+            &mut quality_flags,
+        );
+        rows.push(ExportSensorSampleRow {
+            sample_id: sensor_sample_id(&context.row.frame_id, &series.name, sample_index),
+            frame_id: context.row.frame_id.clone(),
+            evidence_id: context.row.evidence_id.clone(),
+            captured_at: context.row.captured_at.clone(),
+            sample_time: sample_time.time,
+            sample_time_unix_ms: sample_time.unix_ms,
+            sample_time_source: sample_time.source.clone(),
+            source_signal: source_signal.to_string(),
+            packet_type_name: context.row.packet_type_name.clone(),
+            packet_k: context.packet_k,
+            domain: context.domain.map(ToOwned::to_owned),
+            series_name: series.name.clone(),
+            sample_index,
+            payload_offset: 0,
+            raw_i16: None,
+            raw_u8: None,
+            sample_value: i64::from(value),
+            unit: "raw_u32_ppg".to_string(),
+            device_timestamp_seconds: context.timestamp_seconds,
+            device_timestamp_subseconds: context.timestamp_subseconds,
+            parser_version: context.row.parser_version.clone(),
+            quality_flags,
+            provenance: json!({
+                "input_source": "decoded_frame_payload",
+                "frame_id": context.row.frame_id,
+            }),
+        });
+    }
 }
 
 struct SensorSampleContext<'a> {

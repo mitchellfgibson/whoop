@@ -17,6 +17,7 @@ mod error;
 pub mod export;
 pub mod fixtures;
 pub mod health_sync;
+pub mod healthspan;
 pub mod historical_sync;
 pub mod local_health_validation;
 pub mod metric_features;

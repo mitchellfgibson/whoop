@@ -154,6 +154,27 @@ pub enum DataPacketBodySummary {
         axes: Vec<I16SeriesSummary>,
         warnings: Vec<String>,
     },
+    /// WHOOP 5.0 firmware v20 stored-history PPG (k=20): 50 Hz raw optical samples,
+    /// two bursts of 25 `u32` LE at body offsets 26 and 226. See
+    /// docs/whoop5-v20-v21-corpus/DECODE-SPEC.md.
+    HistoryPpgK20 {
+        sample_count: usize,
+        sample_rate_hz: u16,
+        samples: U32SeriesSummary,
+        warnings: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct U32SeriesSummary {
+    pub name: String,
+    pub parsed_count: usize,
+    pub min: Option<u32>,
+    pub max: Option<u32>,
+    pub mean: Option<u32>,
+    pub preview: Vec<u32>,
+    /// All decoded samples, in capture order, so downstream HR/HRV can use the waveform.
+    pub samples: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -519,6 +540,15 @@ fn parse_data_packet_body_summary(
         return (None, Vec::new());
     };
 
+    // WHOOP 5.0 firmware ≥ v20/v21 (the 2026-06-17 07:56 UTC flip) ships stored *history*
+    // (packet_type HISTORICAL_DATA = 47) with new k20 (PPG) / k21 (accel) layouts whose body
+    // begins with the format tag 0x04. The same k21 value also appears in realtime packets
+    // (REALTIME_DATA = 40, REALTIME_RAW_DATA = 43) and in pre-flip historical captures with
+    // the older grouped layout, so the new decoders are gated on both packet_type == 47 AND
+    // body format tag 0x04. Everything else keeps the previous behavior.
+    let is_history = payload.first().copied() == Some(PACKET_TYPE_HISTORICAL_DATA);
+    let is_v20_v21_format = is_history && payload.get(13).copied() == Some(0x04);
+
     match packet_k {
         7 | 9 | 12 | 18 | 24 => (
             Some(DataPacketBodySummary::NormalHistory {
@@ -530,6 +560,8 @@ fn parse_data_packet_body_summary(
         ),
         17 => parse_r17_body_summary(payload),
         10 => parse_k10_raw_motion_summary(payload),
+        20 if is_v20_v21_format => parse_k20_history_ppg_summary(payload),
+        21 if is_v20_v21_format => parse_k21_history_motion_summary(payload),
         21 => parse_k21_raw_motion_summary(payload),
         _ => (None, Vec::new()),
     }
@@ -593,6 +625,8 @@ fn parse_k10_raw_motion_summary(payload: &[u8]) -> (Option<DataPacketBodySummary
     )
 }
 
+/// Realtime k21 grouped-motion (REALTIME_DATA / REALTIME_RAW_DATA), older APK layout.
+/// Preserved for live frames; historical frames use `parse_k21_history_motion_summary`.
 fn parse_k21_raw_motion_summary(payload: &[u8]) -> (Option<DataPacketBodySummary>, Vec<String>) {
     let group_1_count = read_u16_le(payload, 16);
     let group_2_count = read_u16_le(payload, 622);
@@ -621,6 +655,113 @@ fn parse_k21_raw_motion_summary(payload: &[u8]) -> (Option<DataPacketBodySummary
             group_1_count,
             group_2_count,
             axes,
+            warnings: warnings.clone(),
+        }),
+        warnings,
+    )
+}
+
+/// WHOOP 5.0 firmware v21 (k=21) stored-history accelerometer (HISTORICAL_DATA).
+///
+/// Body layout (offsets relative to the 13-byte data-packet header):
+///   [0]   = format tag (constant 0x04)
+///   [1:3] = group-1 sample count   (constant 100)
+///   [3:5] = group-2 sample count   (constant 100)
+///   [5:7] = axis count             (constant 3)
+///   [7..] = six sequential blocks of `count` i16 LE:
+///           g1x, g1y, g1z, g2x, g2y, g2z
+///
+/// The two 100-sample groups are the two halves of one second (=> 100 Hz, 3 axes).
+/// We concatenate group1+group2 per axis and expose them as `accelerometer_x/y/z`
+/// so `selected_motion_axes` / `motion_plan_from_row` consume them and sleep + steps
+/// compute. See docs/whoop5-v20-v21-corpus/DECODE-SPEC.md.
+fn parse_k21_history_motion_summary(payload: &[u8]) -> (Option<DataPacketBodySummary>, Vec<String>) {
+    const BODY: usize = 13; // data-packet header length
+    let format_tag = payload.get(BODY).copied();
+    let group_1_count = read_u16_le(payload, BODY + 1);
+    let group_2_count = read_u16_le(payload, BODY + 3);
+    let axis_count = read_u16_le(payload, BODY + 5);
+
+    let mut warnings = Vec::new();
+    if format_tag != Some(0x04) {
+        warnings.push(format!(
+            "k21_unexpected_format_tag_{}",
+            format_tag.map(|tag| tag as i32).unwrap_or(-1)
+        ));
+    }
+    let g1 = group_1_count.unwrap_or(0) as usize;
+    let g2 = group_2_count.unwrap_or(0) as usize;
+    if axis_count != Some(3) {
+        warnings.push(format!(
+            "k21_unexpected_axis_count_{}",
+            axis_count.map(|count| count as i32).unwrap_or(-1)
+        ));
+    }
+
+    // Sample region begins after the 7-byte body header.
+    let base = BODY + 7;
+    let mut axes = Vec::new();
+    for (axis_index, axis_name) in ["accelerometer_x", "accelerometer_y", "accelerometer_z"]
+        .into_iter()
+        .enumerate()
+    {
+        // group1 block for this axis, then the matching group2 block, concatenated.
+        let g1_offset = base + axis_index * g1 * 2;
+        let g2_offset = base + (3 * g1 + axis_index * g2) * 2;
+        let (summary, axis_warnings) =
+            summarize_i16_series_concat(payload, &[(g1_offset, g1), (g2_offset, g2)], axis_name);
+        warnings.extend(axis_warnings);
+        if let Some(summary) = summary {
+            axes.push(summary);
+        }
+    }
+
+    (
+        Some(DataPacketBodySummary::RawMotionK21 {
+            field_x: read_u16_le(payload, BODY + 5),
+            group_1_count,
+            group_2_count,
+            axes,
+            warnings: warnings.clone(),
+        }),
+        warnings,
+    )
+}
+
+/// WHOOP 5.0 firmware v20 (k=20) stored-history PPG (raw optical).
+///
+/// Body layout (offsets relative to the 13-byte data-packet header):
+///   [0:26] = body header (format/config; constant prefix, 0x19=25 samples/burst)
+///   [26..] = burst 0: 25 u32 LE optical samples
+///   [226..]= burst 1: 25 u32 LE optical samples
+///
+/// => 50 samples per frame per second = 50 Hz raw PPG. Verified to autocorrelate at a
+/// physiological heart rate. See docs/whoop5-v20-v21-corpus/DECODE-SPEC.md.
+fn parse_k20_history_ppg_summary(payload: &[u8]) -> (Option<DataPacketBodySummary>, Vec<String>) {
+    const BODY: usize = 13;
+    const BURST_LEN: usize = 25;
+    let burst_offsets = [BODY + 26, BODY + 226];
+
+    let mut samples = Vec::with_capacity(BURST_LEN * burst_offsets.len());
+    let mut warnings = Vec::new();
+    for &offset in &burst_offsets {
+        for index in 0..BURST_LEN {
+            match read_u32_le(payload, offset + index * 4) {
+                Some(value) => samples.push(value),
+                None => {
+                    warnings.push("k20_ppg_truncated".to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    let series = summarize_u32_series("k20_ppg", samples);
+    (
+        Some(DataPacketBodySummary::HistoryPpgK20 {
+            sample_count: series.parsed_count,
+            sample_rate_hz: 50,
+            samples: series,
             warnings: warnings.clone(),
         }),
         warnings,
@@ -684,6 +825,78 @@ fn summarize_i16_series(
         }),
         warnings,
     )
+}
+
+/// Decode several (offset, count) ranges of i16 LE samples and concatenate them into a
+/// single named series. Used to stitch the v21 two-group accelerometer blocks (group1 +
+/// group2 of one axis) into one continuous 100 Hz axis.
+fn summarize_i16_series_concat(
+    payload: &[u8],
+    ranges: &[(usize, usize)],
+    name: &str,
+) -> (Option<I16SeriesSummary>, Vec<String>) {
+    let expected_count: usize = ranges.iter().map(|(_, count)| *count).sum();
+    let first_offset = ranges.first().map(|(offset, _)| *offset).unwrap_or(0);
+    let mut warnings = Vec::new();
+    let mut min = None;
+    let mut max = None;
+    let mut sum = 0i64;
+    let mut preview = Vec::new();
+    let mut parsed_count = 0usize;
+
+    for &(offset, count) in ranges {
+        let available = payload.len().saturating_sub(offset);
+        let parsable = count.min(available / 2);
+        if parsable < count {
+            warnings.push(format!("{name}_truncated"));
+        }
+        for index in 0..parsable {
+            let value = read_i16_le(payload, offset + index * 2).expect("guarded by parsable");
+            min = Some(min.map_or(value, |current: i16| current.min(value)));
+            max = Some(max.map_or(value, |current: i16| current.max(value)));
+            sum += i64::from(value);
+            if preview.len() < 8 {
+                preview.push(value);
+            }
+            parsed_count += 1;
+        }
+    }
+
+    (
+        Some(I16SeriesSummary {
+            name: name.to_string(),
+            offset: first_offset,
+            expected_count,
+            parsed_count,
+            min,
+            max,
+            sum,
+            preview,
+        }),
+        warnings,
+    )
+}
+
+fn summarize_u32_series(name: &str, samples: Vec<u32>) -> U32SeriesSummary {
+    let parsed_count = samples.len();
+    let min = samples.iter().copied().min();
+    let max = samples.iter().copied().max();
+    let mean = if parsed_count == 0 {
+        None
+    } else {
+        let total: u64 = samples.iter().map(|value| u64::from(*value)).sum();
+        Some((total / parsed_count as u64) as u32)
+    };
+    let preview = samples.iter().copied().take(8).collect();
+    U32SeriesSummary {
+        name: name.to_string(),
+        parsed_count,
+        min,
+        max,
+        mean,
+        preview,
+        samples,
+    }
 }
 
 fn parsed_payload_warnings(payload: &ParsedPayload) -> &[String] {
